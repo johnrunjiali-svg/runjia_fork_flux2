@@ -73,9 +73,11 @@ def main(
         size = settings.get("width", 256), settings.get("height", 256)
         if "ref_image" in settings or "init_image" in settings:
             (run / "inputs").mkdir(exist_ok=True)
-        if "ref_image" in settings:  # exactly what the network is shown
-            ref = fit_reference(settings["ref_image"], settings.get("ref_max_pixels", 512**2))
-            ref.save(run / "inputs" / "ref.png")
+        for k, ref in enumerate(settings.get("ref_image", "").split(",") if "ref_image" in settings else []):
+            ref = fit_reference(
+                ref, settings.get("ref_max_pixels", 512**2)
+            )  # exactly what the network is shown
+            ref.save(run / "inputs" / f"ref{k + 1}.png")
         if "init_image" in settings:
             Image.open(settings["init_image"]).convert("RGB").resize(size).save(run / "inputs" / "init.png")
 

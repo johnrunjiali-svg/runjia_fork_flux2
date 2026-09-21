@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Torus tiles</title>
+<style>
+  :root { --bg:#f6f5f2; --panel:#fff; --ink:#1d1d1b; --dim:#77756f; --line:#dddad2; --accent:#1f7a4d; --keep:31,122,77; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --panel:#20201e; --ink:#ecebe6; --dim:#97958d; --line:#383733; --accent:#4cc38a; --keep:76,195,138; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 ui-sans-serif,system-ui,sans-serif; }
+  main { max-width:1500px; margin:0 auto; padding:20px 16px 48px; display:grid; gap:20px; grid-template-columns:minmax(320px,440px) 1fr; }
+  @media (max-width:900px) { main { grid-template-columns:1fr; } }
+  h1 { font-size:15px; margin:0 0 2px; } h2 { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); margin:0 0 8px; font-weight:600; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  textarea { width:100%; min-height:110px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:9px; background:transparent; color:inherit; font:inherit; }
+  .drop { border:1.5px dashed var(--line); border-radius:8px; padding:16px; text-align:center; color:var(--dim); cursor:pointer; transition:.12s; }
+  .drop.over { border-color:var(--accent); color:var(--accent); background:rgba(var(--keep),.07); }
+  .thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; } .thumbs:empty { display:none; }
+  .thumb { position:relative; } .thumb img { height:74px; border-radius:5px; display:block; }
+  .thumb button { position:absolute; top:-6px; right:-6px; width:20px; height:20px; border-radius:50%; border:0; background:var(--ink); color:var(--bg); cursor:pointer; line-height:1; padding:0; }
+  .stage { position:relative; margin-top:10px; line-height:0; touch-action:none; user-select:none; }
+  .stage canvas { width:100%; border-radius:6px; display:block; }
+  #mask { position:absolute; inset:0; height:100%; image-rendering:pixelated; cursor:crosshair; }
+  .row { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin-top:10px; }
+  label { color:var(--dim); display:flex; gap:6px; align-items:center; } label b { color:var(--ink); font-weight:500; min-width:1.4em; }
+  input[type=number], select { width:76px; padding:4px 6px; border:1px solid var(--line); border-radius:5px; background:transparent; color:inherit; font:inherit; }
+  button.b { border:1px solid var(--line); background:transparent; color:inherit; border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  button.b.on { border-color:var(--accent); color:var(--accent); }
+  #go { width:100%; padding:11px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:600 15px inherit; cursor:pointer; }
+  #go:disabled { opacity:.55; cursor:default; }
+  #bar { height:4px; border-radius:2px; background:var(--line); margin-top:10px; overflow:hidden; } #bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .3s; }
+  #status { color:var(--dim); margin-top:6px; min-height:1.4em; } #status.err { color:#d2452f; }
+  .outs { display:grid; gap:14px; grid-template-columns:1fr 2fr 2fr; align-items:start; }
+  @media (max-width:1100px) { .outs { grid-template-columns:1fr; } }
+  figure { margin:0; } figure img { width:100%; border-radius:6px; display:block; background:var(--line); min-height:80px; } figcaption { color:var(--dim); margin-top:6px; }
+  .hint { color:var(--dim); margin:8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <section>
+      <h1>Torus tiles</h1>
+      <p class="hint" style="margin:0 0 12px">FLUX.2 with nearest-copy RoPE: the output tiles seamlessly in all four directions.</p>
+      <h2>1 · Prompt</h2>
+      <textarea id="prompt" spellcheck="false">seamless rose pattern on plain background, irregular scattered roses with long winding stems, elegant floral illustration, organic layout, varied scale</textarea>
+    </section>
+
+    <section>
+      <h2>2 · Reference images <span style="text-transform:none;letter-spacing:0">(optional, FLUX.2 image-to-image)</span></h2>
+      <div class="drop" id="refDrop">Drop images here, or click to choose</div>
+      <div class="thumbs" id="refThumbs"></div>
+      <input type="file" id="refFile" accept="image/*" multiple hidden>
+    </section>
+
+    <section>
+      <h2>3 · Init image <span style="text-transform:none;letter-spacing:0">(optional, paint what must stay untouched)</span></h2>
+      <div class="drop" id="initDrop">Drop one image here, or click to choose</div>
+      <input type="file" id="initFile" accept="image/*" hidden>
+      <div id="initTools" hidden>
+        <div class="stage"><canvas id="base"></canvas><canvas id="mask"></canvas></div>
+        <div class="row">
+          <button class="b on" id="modeKeep">Keep</button><button class="b" id="modeErase">Erase</button>
+          <label>Brush <input type="range" id="brush" min="1" max="12" value="3"><b id="brushN">3</b></label>
+        </div>
+        <div class="row">
+          <button class="b" id="keepCenter">Keep centre 70%</button><button class="b" id="keepAll">Keep all</button>
+          <button class="b" id="keepNone">Clear</button><button class="b" id="initRemove">Remove image</button>
+        </div>
+        <p class="hint">Green stays exactly as it is; everything else is generated so the picture wraps. One square = one 16×16 px token, which is the unit the model keeps. Right-drag erases. <span id="keptN"></span></p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <div class="row">
+        <label>Size <select id="width"></select> × <select id="height"></select></label>
+        <label>Seed <input type="number" id="seed" value="0"></label>
+        <label><input type="checkbox" id="randomSeed"> new seed each run</label>
+      </div>
+      <div class="row">
+        <label>Steps <input type="number" id="num_steps" value="50" min="1"></label>
+        <label>Guidance <input type="number" id="guidance" value="4" step="0.5"></label>
+        <label>Geo guidance <input type="number" id="geo_guidance" value="2" step="0.5"></label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="wrap" checked> torus wrap (off = stock FLUX.2 baseline)</label>
+        <label><input type="checkbox" id="unanchor_text"> unanchor text</label>
+        <label>Ref max side <select id="refSide"><option>384</option><option selected>512</option><option>768</option><option>1024</option></select></label>
+      </div>
+    </section>
+
+    <button id="go">Generate</button>
+    <div id="bar"><i></i></div>
+    <div id="status"></div>
+  </div>
+
+  <div>
+    <section>
+      <h2>Output</h2>
+      <div class="outs">
+        <figure><img id="outTile" alt=""><figcaption>One tile</figcaption></figure>
+        <figure><img id="outGrid" alt=""><figcaption>2 × 2, pulled apart</figcaption></figure>
+        <figure><img id="outSeamless" alt=""><figcaption>2 × 2, joined: the seams are in the middle</figcaption></figure>
+      </div>
+      <p class="hint" id="saved"></p>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const TOKEN = 16;
+
+// ---------- settings ----------
+for (const id of ["width", "height"]) {
+  for (const v of [256, 384, 512, 768, 1024]) $(id).add(new Option(v, v, v === 256, v === 256));
+  $(id).onchange = () => drawInit(true);
+}
+
+// ---------- drag and drop ----------
+function dropzone(zone, input, onFiles) {
+  zone.onclick = () => input.click();
+  input.onchange = () => { onFiles([...input.files]); input.value = ""; };
+  for (const ev of ["dragenter", "dragover"]) zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.remove("over"); });
+  zone.addEventListener("drop", e => onFiles([...e.dataTransfer.files].filter(f => f.type.startsWith("image/"))));
+}
+window.addEventListener("dragover", e => e.preventDefault());   // a missed drop must not navigate away
+window.addEventListener("drop", e => e.preventDefault());
+
+const loadImage = file => new Promise((ok, bad) => {
+  const img = new Image();
+  img.onload = () => ok(img); img.onerror = () => bad(new Error("could not read " + file.name));
+  img.src = URL.createObjectURL(file);
+});
+
+// ---------- reference images: shrunk in the browser, the server fits them again ----------
+const refs = [];
+function shrink(img, maxSide) {
+  const k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL("image/png");
+}
+function renderRefs() {
+  $("refThumbs").innerHTML = "";
+  refs.forEach((url, i) => {
+    const d = document.createElement("div"); d.className = "thumb";
+    d.innerHTML = `<img src="${url}" alt=""><button title="remove">×</button>`;
+    d.querySelector("button").onclick = () => { refs.splice(i, 1); renderRefs(); };
+    $("refThumbs").append(d);
+  });
+}
+dropzone($("refDrop"), $("refFile"), async files => {
+  for (const f of files) refs.push(shrink(await loadImage(f), 2048));
+  renderRefs();
+});
+
+// ---------- init image and the keep mask, painted in tokens ----------
+let initImg = null, keep = null, gw = 0, gh = 0, erase = false, painting = false;
+const base = $("base"), mask = $("mask");
+
+function drawInit(resetMask) {
+  if (!initImg) return;
+  const W = +$("width").value, H = +$("height").value;
+  base.width = W; base.height = H;
+  // centre-crop to the output's aspect ratio, never squash
+  const s = Math.max(W / initImg.naturalWidth, H / initImg.naturalHeight);
+  const sw = W / s, sh = H / s;
+  base.getContext("2d").drawImage(initImg, (initImg.naturalWidth - sw) / 2, (initImg.naturalHeight - sh) / 2, sw, sh, 0, 0, W, H);
+  if (resetMask || gw !== W / TOKEN || gh !== H / TOKEN) {
+    gw = W / TOKEN; gh = H / TOKEN; mask.width = gw; mask.height = gh;
+    keep = new Uint8Array(gw * gh);
+    fillCenter(0.7);
+  }
+  drawMask();
+}
+function drawMask() {
+  const ctx = mask.getContext("2d"), px = ctx.createImageData(gw, gh);
+  const rgb = getComputedStyle(document.documentElement).getPropertyValue("--keep").split(",").map(Number);
+  let n = 0;
+  for (let i = 0; i < keep.length; i++) { px.data.set([...rgb, keep[i] ? 120 : 0], i * 4); n += keep[i]; }
+  ctx.putImageData(px, 0, 0);
+  $("keptN").textContent = `${n} of ${keep.length} tokens kept.`;
+}
+function fillCenter(f) {
+  const mh = Math.round(gh * (1 - f) / 2), mw = Math.round(gw * (1 - f) / 2);
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) keep[y * gw + x] = +(y >= mh && y < gh - mh && x >= mw && x < gw - mw);
+}
+function paint(e) {
+  const r = mask.getBoundingClientRect();
+  const cx = (e.clientX - r.left) / r.width * gw, cy = (e.clientY - r.top) / r.height * gh, rad = +$("brush").value / 2;
+  for (let y = Math.floor(cy - rad); y <= cy + rad; y++) for (let x = Math.floor(cx - rad); x <= cx + rad; x++)
+    if (x >= 0 && y >= 0 && x < gw && y < gh && Math.hypot(x + .5 - cx, y + .5 - cy) <= Math.max(rad, .71))
+      keep[y * gw + x] = +!(erase || e.buttons === 2);
+  drawMask();
+}
+mask.addEventListener("pointerdown", e => { painting = true; mask.setPointerCapture(e.pointerId); paint(e); });
+mask.addEventListener("pointermove", e => painting && paint(e));
+mask.addEventListener("pointerup", () => painting = false);
+mask.addEventListener("contextmenu", e => e.preventDefault());
+
+const setMode = e => { erase = e; $("modeKeep").classList.toggle("on", !e); $("modeErase").classList.toggle("on", e); };
+$("modeKeep").onclick = () => setMode(false); $("modeErase").onclick = () => setMode(true);
+$("brush").oninput = () => $("brushN").textContent = $("brush").value;
+$("keepCenter").onclick = () => { fillCenter(0.7); drawMask(); };
+$("keepAll").onclick = () => { keep.fill(1); drawMask(); };
+$("keepNone").onclick = () => { keep.fill(0); drawMask(); };
+$("initRemove").onclick = () => { initImg = null; $("initTools").hidden = true; $("initDrop").hidden = false; };
+dropzone($("initDrop"), $("initFile"), async files => {
+  if (!files.length) return;
+  initImg = await loadImage(files[0]);
+  $("initTools").hidden = false; $("initDrop").hidden = true;
+  drawInit(true);
+});
+
+// ---------- generate ----------
+const status = (text, err) => { $("status").textContent = text; $("status").className = err ? "err" : ""; };
+$("go").onclick = async () => {
+  if ($("randomSeed").checked) $("seed").value = Math.floor(Math.random() * 2 ** 31);
+  const num = id => +$(id).value, side = num("refSide");
+  const rows = [];
+  if (initImg) for (let y = 0; y < gh; y++) rows.push([...keep.subarray(y * gw, (y + 1) * gw)]);
+  const body = {
+    prompt: $("prompt").value.trim(), refs, init: initImg ? base.toDataURL("image/png") : null, keep: initImg ? rows : null,
+    settings: { width: num("width"), height: num("height"), seed: num("seed"), num_steps: num("num_steps"), guidance: num("guidance"),
+      geo_guidance: num("geo_guidance"), wrap: $("wrap").checked, unanchor_text: $("unanchor_text").checked, ref_max_pixels: side * side },
+  };
+  if (!body.prompt) return status("Write a prompt first.", true);
+
+  $("go").disabled = true; status("Encoding…"); const t0 = Date.now();
+  const poll = setInterval(async () => {
+    const p = await (await fetch("/progress")).json();
+    if (p.total) { document.querySelector("#bar i").style.width = 100 * p.step / p.total + "%"; status(`Step ${p.step} / ${p.total} · ${((Date.now() - t0) / 1000).toFixed(0)} s`); }
+  }, 500);
+  try {
+    const res = await fetch("/generate", { method: "POST", body: JSON.stringify(body) }), out = await res.json();
+    if (!res.ok) throw new Error(out.error);
+    $("outTile").src = out.tile; $("outGrid").src = out.grid; $("outSeamless").src = out.seamless;
+    $("saved").textContent = `Saved on the server as ${out.saved}_{tile,grid,seamless}.png · seed ${body.settings.seed}`;
+    status(`Done in ${((Date.now() - t0) / 1000).toFixed(0)} s.`);
+  } catch (e) { status(e.message, true); }
+  clearInterval(poll); document.querySelector("#bar i").style.width = "0"; $("go").disabled = false;
+};
+</script>
+</body>
+</html>

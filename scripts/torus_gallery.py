@@ -18,12 +18,12 @@ def main(run_dir: str):
     md += ["Settings not listed are the defaults of `flux2.torus_generate.generate`.", ""]
     md += [f"Geometry sentence: _{config['geo_prompt']}_", ""]
 
-    inputs = [f for f in ("ref", "init", "keep") if (run / "inputs" / f"{f}.png").exists()]
+    inputs = sorted(f.stem for f in (run / "inputs").glob("*.png"))
     if inputs:
         md += ["## inputs", "", "| " + " | ".join(inputs) + " |", "|" + " --- |" * len(inputs)]
         md += ["| " + " | ".join(f"![](inputs/{f}.png)" for f in inputs) + " |", ""]
         md += [
-            "`ref`: reference image. `init`: the picture being made to tile. `keep`: white = untouched.",
+            "`ref*`: reference images. `init`: the picture being made to tile. `keep`: white = untouched.",
             "",
         ]
 

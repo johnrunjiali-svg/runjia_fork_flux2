@@ -116,7 +116,10 @@ def generate(
     geo_prompt: str = TORUS_PROMPT,
     wrap: tuple[bool, bool] = (True, True),  # (h, w)
     unanchor_text: bool = False,
-    ref_image: str | Image.Image | None = None,  # FLUX.2 image-to-image reference, shared by the batch
+    ref_image: str
+    | Image.Image
+    | list
+    | None = None,  # FLUX.2 reference(s), shared by the batch; "a.png,b.png" ok
     ref_max_pixels: int = 512**2,  # see fit_reference
     init_image: str | Image.Image | None = None,  # the picture whose kept region stays untouched
     keep_mask: str | Image.Image | None = None,
@@ -124,6 +127,7 @@ def generate(
     paste_kept_pixels: bool = True,  # kept latents decode to *almost* the original; this makes it exact
     decode_pad: int = DECODE_PAD_TOKENS,
     q_chunk: int = 512,
+    on_step=None,
 ) -> Tensor:
     """Returns uint8 [P, height, width, 3] on the CPU, one image per prompt."""
     prompts = [prompt] if isinstance(prompt, str) else list(prompt)
@@ -152,12 +156,17 @@ def generate(
     x, x_ids = batched_prc_img(randn)
 
     ref = ref_ids = keep = clean = None
-    if ref_image is not None:
-        ref_pixels = default_images_prep(fit_reference(ref_image, ref_max_pixels))[None].cuda()
-        z = pipe.ae.encode(ref_pixels.to(ae_dtype))[0]
-        # t=10 is FLUX.2's first reference slot (sampling.py:76)
-        ref, ref_ids = prc_img(z.to(torch.bfloat16), t_coord=torch.tensor([10]))
-        ref, ref_ids = ref[None], ref_ids[None]
+    if ref_image:
+        ref_images = ref_image.split(",") if isinstance(ref_image, str) else ref_image
+        ref_images = ref_images if isinstance(ref_images, (list, tuple)) else [ref_images]
+        tokens = []
+        for k, image in enumerate(ref_images):
+            pixels = default_images_prep(fit_reference(image, ref_max_pixels))[None].cuda()
+            z = pipe.ae.encode(pixels.to(ae_dtype))[0]
+            # FLUX.2 tells references apart by the t axis: 10, 20, ... (sampling.py:76)
+            tokens.append(prc_img(z.to(torch.bfloat16), t_coord=torch.tensor([10 * (k + 1)])))
+        ref = torch.cat([t for t, _ in tokens])[None]
+        ref_ids = torch.cat([i for _, i in tokens])[None]
     if init_image is not None:
         init_pixels = load_pixels(init_image, width, height)
         clean = rearrange(pipe.ae.encode(init_pixels.to(ae_dtype)).to(torch.bfloat16), "b c h w -> b (h w) c")
@@ -167,7 +176,18 @@ def generate(
     geo = build_torus_geometry(pipe.model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text, ref_ids)
     timesteps = get_schedule(num_steps, x.shape[1])
     x = denoise_torus(
-        pipe.model, x, ctx, geo, timesteps, guidance, geo_guidance, q_chunk, ref=ref, keep=keep, clean=clean
+        pipe.model,
+        x,
+        ctx,
+        geo,
+        timesteps,
+        guidance,
+        geo_guidance,
+        q_chunk,
+        ref=ref,
+        keep=keep,
+        clean=clean,
+        on_step=on_step,
     )
 
     x = rearrange(x, "b (h w) c -> b c h w", h=gh, w=gw)

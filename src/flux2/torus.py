@@ -232,6 +232,7 @@ def denoise_torus(
     ref: Tensor | None = None,  # [1, N_ref, C] clean reference tokens, seen by every branch
     keep: Tensor | None = None,  # [1, N_img, 1] bool: tokens that must come out equal to `clean`
     clean: Tensor | None = None,  # [1, N_img, C] the encoded picture that `keep` refers to
+    on_step=None,  # called as on_step(steps_done, steps_total); the web page's progress bar
 ) -> Tensor:
     """Euler flow matching with the three-way guidance of reference_code/pipeline_flux2_erp.py:
 
@@ -246,7 +247,7 @@ def denoise_torus(
     trajectory (at t=1 it is what `img` already holds, at t=0 it is exactly `clean`).
     """
     noise, num_img = img, img.shape[1]
-    for t_curr, t_prev in tqdm(list(zip(timesteps[:-1], timesteps[1:])), desc="denoise"):
+    for step, (t_curr, t_prev) in enumerate(tqdm(list(zip(timesteps[:-1], timesteps[1:])), desc="denoise")):
         t_vec = torch.full((txt.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         branches = txt.shape[0] // img.shape[0]
         x = img.repeat(branches, 1, 1)
@@ -260,6 +261,8 @@ def denoise_torus(
         img = img + (t_prev - t_curr) * v
         if keep is not None:
             img = torch.where(keep, (1 - t_prev) * clean + t_prev * noise, img)
+        if on_step is not None:
+            on_step(step + 1, len(timesteps) - 1)
     return img
 
 
