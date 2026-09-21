@@ -57,6 +57,7 @@ import torch
 from einops import rearrange
 from torch import Tensor
 from torch.nn import functional as F
+from tqdm import tqdm
 
 from .model import Flux2, apply_rope, timestep_embedding
 
@@ -66,7 +67,8 @@ TORUS_PROMPT = (
     "The whole image is one single seamless tile: its left edge continues into its right edge and "
     "its top edge continues into its bottom edge, so copies of it placed side by side join with no "
     "visible seam. The image is exactly one cell, not a grid or mosaic of smaller repeated tiles, "
-    "and nothing inside it repeats. No border, no frame, no vignette."
+    "and no motif or cluster inside it is visibly repeated: irregular organic layout, varied scale, "
+    "elements cross the edges. No border, no frame, no vignette."
 )
 
 # One-sided receptive field of the AE decoder is ~18 latent pixels (same number as
@@ -204,8 +206,8 @@ def torus_forward(
 
 def denoise_torus(
     model: Flux2,
-    img: Tensor,  # [1, N_img, C]
-    txt: Tensor,  # [3, N_txt, D]: empty prompt, prompt, prompt + TORUS_PROMPT  (or the first two only)
+    img: Tensor,  # [P, N_img, C], one latent per prompt
+    txt: Tensor,  # [3P, N_txt, D]: P empty prompts, P prompts, P prompts + TORUS_PROMPT  (or [2P]: no third block)
     geo: TorusGeometry,
     timesteps: list[float],
     guidance: float,
@@ -220,15 +222,16 @@ def denoise_torus(
     adds over the prompt alone. With geo_guidance == guidance the v_cond terms cancel and this is
     plain CFG on the long prompt, so the third branch only says something new away from that value.
     """
-    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+    for t_curr, t_prev in tqdm(list(zip(timesteps[:-1], timesteps[1:])), desc="denoise"):
         t_vec = torch.full((txt.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        branches = txt.shape[0] // img.shape[0]
         pred = torus_forward(
-            model, img.expand(txt.shape[0], -1, -1), t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk
+            model, img.repeat(branches, 1, 1), t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk
         )
-        v_uncond, v_cond = pred[0:1], pred[1:2]
+        v_uncond, v_cond, *v_geo = pred.chunk(branches)
         v = v_uncond + guidance * (v_cond - v_uncond)
-        if txt.shape[0] == 3:
-            v = v + geo_guidance * (pred[2:3] - v_cond)
+        if v_geo:
+            v = v + geo_guidance * (v_geo[0] - v_cond)
         img = img + (t_prev - t_curr) * v
     return img
 
