@@ -30,11 +30,11 @@ from flux2.util import FLUX2_MODEL_INFO, load_ae, load_flow_model, load_text_enc
 def main(
     prompt: str,
     seed: int = 0,
-    width: int = 1024,
-    height: int = 1024,
+    width: int = 256,
+    height: int = 256,
     num_steps: int = 50,
     guidance: float = 4.0,
-    geo_guidance: float = 6.0,  # the reference's default for ERP on FLUX.2-dev; untuned here
+    geo_guidance: float = 2.0,  # untuned (the reference uses 6 for ERP on FLUX.2-dev); == guidance is plain CFG
     geo_prompt: str = TORUS_PROMPT,
     wrap_h: bool = True,
     wrap_w: bool = True,

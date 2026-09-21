@@ -63,9 +63,10 @@ from .model import Flux2, apply_rope, timestep_embedding
 # Appended to the prompt for the third guidance branch, the analogue of ERP_PROMPT in
 # reference_code/erp_utils.py. Untuned.
 TORUS_PROMPT = (
-    "Seamless tileable image, a perfectly periodic pattern that repeats in all four directions, "
-    "the left edge continues into the right edge and the top edge continues into the bottom edge, "
-    "uniform composition with no center and no horizon, no border, no frame, no vignette."
+    "The whole image is one single seamless tile: its left edge continues into its right edge and "
+    "its top edge continues into its bottom edge, so copies of it placed side by side join with no "
+    "visible seam. The image is exactly one cell, not a grid or mosaic of smaller repeated tiles, "
+    "and nothing inside it repeats. No border, no frame, no vignette."
 )
 
 # One-sided receptive field of the AE decoder is ~18 latent pixels (same number as
