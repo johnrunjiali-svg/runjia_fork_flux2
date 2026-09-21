@@ -14,6 +14,12 @@ Everything else is an argument of `generate` and is passed through, e.g.
     --init_image a.png --keep_center 0.7      the middle 70% x 70% of a.png stays untouched, the band
                                               around it is generated so that the picture tiles
     --init_image a.png --keep_mask m.png      the same with any region: white = untouched
+    --t_start 0.5                             with an init image: start the sampler half way down the
+                                              flow instead of at pure noise (default 0.6; see
+                                              torus.py). --t_start 1 is the old behaviour, where the
+                                              first step is taken before the model has seen the
+                                              picture and the new region does not join the kept one.
+    --init_image a.png --t_start 0.6          no keep region at all: plain image-to-image
     --width 512 --height 512
 
 Unlike scripts/cli.py this loads no content filter (that is a second, 24B model).
@@ -26,7 +32,7 @@ from pathlib import Path
 from PIL import Image
 
 from flux2.torus import TORUS_PROMPT
-from flux2.torus_generate import TorusPipe, fit_reference, generate, keep_grid, save_png
+from flux2.torus_generate import INIT_T_START, TorusPipe, fit_reference, generate, keep_grid, save_png
 
 
 def read_prompts(path: str) -> list[tuple[str, str]]:
@@ -66,6 +72,8 @@ def main(
     run = Path(output_dir) / run_name
     run.mkdir(parents=True, exist_ok=True)
     config = {"model_name": model_name, "geo_prompt": TORUS_PROMPT, **settings}
+    if "init_image" in settings:  # `generate` picks this one itself; the gallery should still say it
+        config.setdefault("t_start", INIT_T_START)
     (run / "config.json").write_text(json.dumps(config, indent=2))
     manifest = (run / f"manifest_{shard}.jsonl").open("w")
 

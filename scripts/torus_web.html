@@ -71,6 +71,10 @@
           <button class="b" id="keepNone">Clear</button><button class="b" id="initRemove">Remove image</button>
         </div>
         <p class="hint">Paint the part to keep. Green stays exactly as it is; the rest is redrawn so the picture repeats seamlessly. Right-drag erases.<span id="keptN" hidden></span></p>
+        <div class="row">
+          <label>Redraw strength <input type="range" id="t_start" min="0.2" max="1" step="0.05" value="0.6"><b id="tStartN">0.60</b></label>
+        </div>
+        <p class="hint">How far the redrawn part may travel from your picture. At 1.00 it starts from pure noise: the first and largest step is taken before the model has seen your picture, so the new part is laid out for an image that is not there and does not join what it has to join. 0.40–0.70 keeps it aligned; lower changes less.</p>
       </div>
     </section>
 
@@ -208,6 +212,7 @@ mask.addEventListener("contextmenu", e => e.preventDefault());
 const setMode = e => { erase = e; $("modeKeep").classList.toggle("on", !e); $("modeErase").classList.toggle("on", e); };
 $("modeKeep").onclick = () => setMode(false); $("modeErase").onclick = () => setMode(true);
 $("brush").oninput = () => $("brushN").textContent = $("brush").value;
+$("t_start").oninput = () => $("tStartN").textContent = (+$("t_start").value).toFixed(2);
 $("keepCenter").onclick = () => { fillCenter(0.7); drawMask(); };
 $("keepAll").onclick = () => { keep.fill(1); drawMask(); };
 $("keepNone").onclick = () => { keep.fill(0); drawMask(); };
@@ -229,7 +234,8 @@ $("go").onclick = async () => {
   const body = {
     prompt: $("prompt").value.trim(), refs, init: initImg ? base.toDataURL("image/png") : null, keep: initImg ? rows : null,
     settings: { width: num("width"), height: num("height"), seed: num("seed"), num_steps: num("num_steps"), guidance: num("guidance"),
-      geo_guidance: num("geo_guidance"), wrap: $("wrap").checked, unanchor_text: false, ref_max_pixels: side * side },
+      geo_guidance: num("geo_guidance"), wrap: $("wrap").checked, unanchor_text: false, ref_max_pixels: side * side,
+      t_start: initImg ? num("t_start") : 1 },
   };
   if (!body.prompt) return status("Write a prompt first.", true);
 

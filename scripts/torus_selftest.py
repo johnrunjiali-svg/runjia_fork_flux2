@@ -6,7 +6,9 @@
    tell where the image was cut. With the text anchored (the default) the same test must fail.
 4. decode_torus returns the right size.
 5. With reference tokens ([txt, img, ref], ref grid larger than the image grid): 1 and 2 again.
-6. denoise_torus with `keep`: kept tokens come out exactly clean, free tokens do not.
+6. denoise_torus with `keep`: kept tokens come out exactly clean, free tokens do not -- from pure
+   noise, and from a partially noised start (t_start) with the noise handed in separately.
+7. schedule_from: starts at exactly t_start, ends at 0, strictly decreasing, t_start=1 is stock.
 """
 
 import itertools
@@ -17,7 +19,9 @@ from einops import rearrange
 
 from flux2.autoencoder import AutoEncoder, AutoEncoderParams
 from flux2.model import Flux2, rope
+from flux2.sampling import get_schedule
 from flux2.torus import build_torus_geometry, decode_torus, denoise_torus, torus_attention, torus_forward
+from flux2.torus_generate import schedule_from
 
 
 @dataclass
@@ -151,22 +155,36 @@ def main():
     noise, clean = torch.randn(2, gh * gw, 8), torch.randn(1, gh * gw, 8)
     keep = torch.rand(1, gh * gw, 1) < 0.5
     txt = torch.randn(6, num_txt, 12)
-    out = denoise_torus(
-        model,
-        noise,
-        txt,
-        geo,
-        [1.0, 0.6, 0.3, 0.0],
-        4.0,
-        2.0,
-        ref=x_ref[:1, gh * gw :],
-        keep=keep,
-        clean=clean,
-    )
-    kept = keep.expand_as(out)
-    assert torch.equal(out[kept], clean.expand_as(out)[kept])
-    assert (out - clean)[~kept].abs().min() > 1e-4
-    print("ok   keep: kept tokens are exactly clean")
+    for t_start in (1.0, 0.6):
+        # What generate hands in: pure noise at t_start = 1, the mixture below it.
+        img = noise if t_start == 1.0 else (1 - t_start) * clean + t_start * noise
+        steps = [t_start * t for t in (1.0, 0.6, 0.3, 0.0)]
+        out = denoise_torus(
+            model,
+            img,
+            txt,
+            geo,
+            steps,
+            4.0,
+            2.0,
+            ref=x_ref[:1, gh * gw :],
+            keep=keep,
+            clean=clean,
+            noise=noise,
+        )
+        kept = keep.expand_as(out)
+        assert torch.equal(out[kept], clean.expand_as(out)[kept]), t_start
+        assert (out - clean)[~kept].abs().min() > 1e-4, t_start
+    print("ok   keep: kept tokens are exactly clean, from t=1 and from a partially noised start")
+
+    # 7
+    for num_steps, seq_len in ((4, 48), (50, 1024)):
+        assert schedule_from(num_steps, seq_len, 1.0) == get_schedule(num_steps, seq_len)
+        for t_start in (0.4, 0.55, 0.7, 0.999):
+            s = schedule_from(num_steps, seq_len, t_start)
+            assert len(s) == num_steps + 1 and abs(s[0] - t_start) < 1e-6 and s[-1] == 0.0, (t_start, s)
+            assert all(a > b for a, b in zip(s, s[1:])), (t_start, s)
+    print("ok   schedule_from: starts at t_start, ends at 0, strictly decreasing")
 
     # 4
     ae = AutoEncoder(AutoEncoderParams(ch=32)).eval()

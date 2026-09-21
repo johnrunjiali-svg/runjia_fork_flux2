@@ -53,7 +53,9 @@ def run(pipe: TorusPipe, req: dict) -> dict:
     s = req["settings"]
     width, height = int(s["width"]), int(s["height"])
     keep = torch.tensor(req["keep"] or [[0]], dtype=torch.uint8)
-    use_init = req["init"] is not None and bool(keep.any())
+    # An init image with nothing painted is still worth sending: below t_start = 1 the whole grid
+    # starts from it, which is plain image-to-image.
+    use_init = req["init"] is not None
     # `generate` keeps a token when its 16x16 pixels are all white, so a mask drawn per token is exact.
     keep_mask = Image.fromarray((keep * 255).repeat_interleave(16, 0).repeat_interleave(16, 1).numpy())
 
@@ -73,6 +75,7 @@ def run(pipe: TorusPipe, req: dict) -> dict:
         ref_max_pixels=int(s["ref_max_pixels"]),
         init_image=from_data_url(req["init"]) if use_init else None,
         keep_mask=keep_mask if use_init else None,
+        t_start=float(s.get("t_start", 1.0)) if use_init else 1.0,
         on_step=lambda step, total: progress.update(step=step, total=total),
     )[0]
 

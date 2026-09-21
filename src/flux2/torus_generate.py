@@ -9,6 +9,8 @@
 scripts/torus_cli.py is this function plus files: prompt lists, shards, folders, the gallery.
 """
 
+import math
+
 import torch
 from einops import rearrange
 from PIL import Image
@@ -21,12 +23,18 @@ from .sampling import (
     cap_min_pixels,
     cap_pixels,
     center_crop_to_multiple_of_x,
+    compute_empirical_mu,
     default_images_prep,
+    generalized_time_snr_shift,
     get_schedule,
     prc_img,
 )
 from .torus import DECODE_PAD_TOKENS, TORUS_PROMPT, build_torus_geometry, decode_torus, denoise_torus
 from .util import FLUX2_MODEL_INFO, load_ae, load_flow_model, load_text_encoder
+
+# Where `generate` starts the sampler when it is given an init image and no explicit t_start.
+# Untuned, and the one number worth sweeping for a given picture: see `generate` and torus.py.
+INIT_T_START = 0.6
 
 
 class TorusPipe:
@@ -87,6 +95,23 @@ def save_png(image: Tensor, path: str, tiled: bool = False):
         Image.fromarray(image.repeat(2, 2, 1).numpy()).save(str(path)[:-4] + "_tiled.png")
 
 
+def schedule_from(num_steps: int, image_seq_len: int, t_start: float = 1.0) -> list[float]:
+    """`sampling.get_schedule`, but the first timestep is `t_start` instead of pure noise.
+
+    get_schedule spaces num_steps + 1 points evenly in [1, 0] and bends them with
+    s(u) = e^mu / (e^mu + 1/u - 1), which spends more of the budget at high noise. It inverts in
+    closed form, u(s) = 1 / (1 + e^mu (1/s - 1)), so spacing the points evenly in [u(t_start), 0]
+    and bending them the same way gives num_steps steps that begin at exactly `t_start` and keep
+    the bunching near 0 that the model was tuned for. t_start = 1 is get_schedule unchanged.
+    """
+    assert 0.0 < t_start <= 1.0, f"t_start must be in (0, 1], got {t_start}"
+    if t_start == 1.0:
+        return get_schedule(num_steps, image_seq_len)
+    mu = compute_empirical_mu(image_seq_len, num_steps)
+    u_start = 1.0 / (1.0 + math.exp(mu) * (1.0 / t_start - 1.0))
+    return generalized_time_snr_shift(torch.linspace(u_start, 0, num_steps + 1), mu, 1.0).tolist()
+
+
 def keep_grid(
     width: int, height: int, keep_mask: str | Image.Image | None = None, keep_center: float = 0.0
 ) -> Tensor:
@@ -124,12 +149,22 @@ def generate(
     init_image: str | Image.Image | None = None,  # the picture whose kept region stays untouched
     keep_mask: str | Image.Image | None = None,
     keep_center: float = 0.0,
+    t_start: float | None = None,  # noise level to start at; None = INIT_T_START with an init image, else 1
     paste_kept_pixels: bool = True,  # kept latents decode to *almost* the original; this makes it exact
     decode_pad: int = DECODE_PAD_TOKENS,
     q_chunk: int = 512,
     on_step=None,
 ) -> Tensor:
-    """Returns uint8 [P, height, width, 3] on the CPU, one image per prompt."""
+    """Returns uint8 [P, height, width, 3] on the CPU, one image per prompt.
+
+    `t_start` is where on the flow's straight line the sampler starts, and it only means anything
+    with an `init_image`: the run begins at x_t = (1 - t_start) init + t_start noise over the whole
+    grid rather than at pure noise. Starting at 1 (no init image, or t_start=1 with one) hides the
+    init picture from the first and largest Euler step -- the kept region is still pure noise then,
+    so the free region is laid out from the prompt alone and does not join what it has to join.
+    0.4-0.7 is the useful band: lower keeps more of the init picture and changes less, higher gives
+    the model more freedom and drifts further from it. See torus.py's module docstring.
+    """
     prompts = [prompt] if isinstance(prompt, str) else list(prompt)
     seeds = [seed] * len(prompts) if isinstance(seed, int) else list(seed)
     gh, gw = height // 16, width // 16
@@ -153,7 +188,8 @@ def generate(
             for s in seeds
         ]
     )
-    x, x_ids = batched_prc_img(randn)
+    noise, x_ids = batched_prc_img(randn)
+    x = noise
 
     ref = ref_ids = keep = clean = None
     if ref_image:
@@ -173,8 +209,15 @@ def generate(
         grid = keep_grid(width, height, keep_mask, keep_center)
         keep = grid.reshape(1, gh * gw, 1)
 
+    if t_start is None:
+        t_start = INIT_T_START if init_image is not None else 1.0
+    t_start = float(t_start)
+    assert init_image is not None or t_start == 1.0, "t_start < 1 starts from the init image; give one"
+    if t_start < 1.0:  # the same mixture the kept tokens are held at, over the whole grid
+        x = (1 - t_start) * clean + t_start * noise
+
     geo = build_torus_geometry(pipe.model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text, ref_ids)
-    timesteps = get_schedule(num_steps, x.shape[1])
+    timesteps = schedule_from(num_steps, x.shape[1], t_start)
     x = denoise_torus(
         pipe.model,
         x,
@@ -187,6 +230,7 @@ def generate(
         ref=ref,
         keep=keep,
         clean=clean,
+        noise=noise,
         on_step=on_step,
     )
 
