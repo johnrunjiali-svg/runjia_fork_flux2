@@ -10,23 +10,22 @@ def main(run_dir: str):
     records = [json.loads(line) for f in sorted(run.glob("manifest_*.jsonl")) for line in f.open()]
     config = json.loads((run / "config.json").read_text())
 
-    shown = [
-        "model_name",
-        "width",
-        "height",
-        "num_steps",
-        "guidance",
-        "geo_guidance",
-        "wrap_h",
-        "wrap_w",
-        "unanchor_text",
-    ]
-    md = [f"# {run.name}", "", ", ".join(f"`{k}={config[k]}`" for k in shown), ""]
+    md = [f"# {run.name}", "", ", ".join(f"`{k}={v}`" for k, v in config.items() if k != "geo_prompt"), ""]
     md += [
         f"{len(records)} images. Each cell: the image, then its 2x2 tiling (seams meet in the middle).",
         "",
     ]
+    md += ["Settings not listed are the defaults of `flux2.torus_generate.generate`.", ""]
     md += [f"Geometry sentence: _{config['geo_prompt']}_", ""]
+
+    inputs = [f for f in ("ref", "init", "keep") if (run / "inputs" / f"{f}.png").exists()]
+    if inputs:
+        md += ["## inputs", "", "| " + " | ".join(inputs) + " |", "|" + " --- |" * len(inputs)]
+        md += ["| " + " | ".join(f"![](inputs/{f}.png)" for f in inputs) + " |", ""]
+        md += [
+            "`ref`: reference image. `init`: the picture being made to tile. `keep`: white = untouched.",
+            "",
+        ]
 
     for set_name in sorted({r["set"] for r in records}):
         md += [f"## {set_name}", ""]

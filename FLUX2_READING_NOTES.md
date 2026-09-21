@@ -889,6 +889,22 @@ middle of its own image. `|d_near| <= n/2`, so no rotation is out of the trainin
 the long prompt**; the third branch only matters away from that. `gamma = 6` is the reference's
 ERP default on FLUX.2-dev, untuned for klein-base.
 
+## Bringing an existing picture in (two independent mechanisms)
+
+- **Reference image = FLUX.2's own i2i.** Tokens appended as `[txt, img, ref]` with `t=10`, all
+  three CFG branches see them (as stock `denoise_cfg` does). Only img-img pairs wrap; every pair
+  touching a ref token keeps its stock displacement, because a reference is a flat picture.
+  The ref is resized to the generation size so `(h, w)` line up with the target.
+- **Untouched region = a constraint on the sampler, not an input to the network.** Since
+  `x_t = (1 - t) x_0 + t * noise`, wherever `x_0` is known `x_t` is known: after every Euler step
+  kept tokens are overwritten by `(1 - t) clean + t * noise`, with the token's own starting noise
+  (one straight trajectory; exactly `clean` at `t=0`). Keep the centre, free a band at the edges:
+  the band is generated while attending across the seam, so an arbitrary picture becomes a tile.
+  A token is kept only if all its 16x16 pixels are masked; kept pixels are pasted back after
+  decoding because the VAE round trip is only approximately the identity.
+- Verified on toy weights: pairwise brute force with ref tokens (ref grid larger than the image
+  grid), wrap-off == stock forward with refs, kept tokens come out bit-exact.
+
 ## Pixel-level seam
 
 The AE decoder zero-pads its convs, so the latent is circularly padded by 9 tokens (= the ~18

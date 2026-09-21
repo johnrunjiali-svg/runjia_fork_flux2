@@ -48,7 +48,16 @@ Two choices that are not forced, so they are flagged here rather than buried:
   network can tell where the image was cut: roll the input latent and the output rolls with it, to
   floating point (scripts/torus_selftest.py checks this).
 
-Text-to-image only: reference-image tokens are not handled.
+Two ways to bring an existing picture in, both optional and independent:
+
+- Reference image (FLUX.2's own image-to-image): its tokens are appended after the image tokens,
+  [txt, img, ref], exactly as the stock `denoise` does. A reference is an ordinary flat picture, so
+  every pair that involves a ref token keeps its stock displacement; only img-img pairs wrap.
+- Untouched region (`keep` in `denoise_torus`): not a condition of the network at all, a constraint
+  on the sampler. After every Euler step the kept tokens are overwritten by the clean latent noised
+  to the current time, so the free tokens are always denoised next to a correctly-noised version of
+  what must stay, across the torus seam as well. Keep the middle of any picture, leave a band at the
+  edges free, and the model has to invent the band that makes the picture tile.
 """
 
 from dataclasses import dataclass
@@ -84,7 +93,7 @@ class TorusGeometry:
     pe_copy: Tensor  # the same, with image tokens moved to their other periodic copy (h and w both)
     use_copy_h: Tensor  # [N, N] bool, [query, key]: on the h axis this pair uses the key's copy
     use_copy_w: Tensor
-    img_img: Tensor  # [N, N] bool: both tokens are image tokens
+    txt_pair: Tensor  # [N, N] bool: at least one of the two tokens is text
     dims: dict[str, slice]  # which head dims each axis rotates: t, h, w, l
     num_txt: int
     unanchor_text: bool
@@ -97,11 +106,16 @@ def build_torus_geometry(
     grid: tuple[int, int],
     wrap: tuple[bool, bool] = (True, True),
     unanchor_text: bool = False,
+    ref_ids: Tensor | None = None,
 ) -> TorusGeometry:
-    """`wrap` is (h, w). (False, True) is a cylinder, (False, False) is stock FLUX.2."""
-    ids = torch.cat((ctx_ids[:1], x_ids[:1]), dim=1)  # [1, N, 4] of (t, h, w, l)
+    """`wrap` is (h, w). (False, True) is a cylinder, (False, False) is stock FLUX.2.
+    The sequence is [txt, img] or [txt, img, ref]; only the img tokens live on the torus."""
+    parts = (ctx_ids[:1], x_ids[:1]) if ref_ids is None else (ctx_ids[:1], x_ids[:1], ref_ids[:1])
+    ids = torch.cat(parts, dim=1)  # [1, N, 4] of (t, h, w, l)
     num_txt = ctx_ids.shape[1]
-    is_img = torch.arange(ids.shape[1], device=ids.device) >= num_txt
+    index = torch.arange(ids.shape[1], device=ids.device)
+    is_txt = index < num_txt
+    is_img = (index >= num_txt) & (index < num_txt + x_ids.shape[1])
     img_img = is_img[:, None] & is_img[None, :]
 
     ids_copy = ids.clone()
@@ -115,10 +129,11 @@ def build_torus_geometry(
         use = d_near != d
         assert torch.equal(torch.where(use, copy[None, :] - r[:, None], d), d_near)
 
-        # From coordinates to tokens. Text sits at coordinate 0 and never wraps.
+        # From coordinates to tokens. Only img-img pairs wrap; text (at coordinate 0) and ref never do.
         pos = ids[0, :, axis]
-        ids_copy[0, :, axis] = torch.where(is_img, copy[pos], pos)
-        use_copy.append(use[pos][:, pos] & img_img)
+        on_grid = pos.clamp(max=n - 1)  # a ref image may be larger than the grid; it is masked out anyway
+        ids_copy[0, :, axis] = torch.where(is_img, copy[on_grid], pos)
+        use_copy.append(use[on_grid][:, on_grid] & img_img)
 
     edges = [sum(model.pe_embedder.axes_dim[:i]) for i in range(5)]
     return TorusGeometry(
@@ -126,7 +141,7 @@ def build_torus_geometry(
         pe_copy=model.pe_embedder(ids_copy),
         use_copy_h=use_copy[0],
         use_copy_w=use_copy[1],
-        img_img=img_img,
+        txt_pair=is_txt[:, None] | is_txt[None, :],
         dims={name: slice(a, b) for name, a, b in zip("thwl", edges, edges[1:])},
         num_txt=num_txt,
         unanchor_text=unanchor_text,
@@ -134,7 +149,7 @@ def build_torus_geometry(
 
 
 def torus_attention(q: Tensor, k: Tensor, v: Tensor, geo: TorusGeometry, q_chunk: int = 512) -> Tensor:
-    """q, k, v: [B, heads, N, head_dim] *before* RoPE, sequence [txt, img]. Returns [B, N, heads * head_dim].
+    """q, k, v: [B, heads, N, head_dim] *before* RoPE, sequence [txt, img(, ref)]. Returns [B, N, heads * head_dim].
 
     Peak memory is about eight float32 tensors of [B, heads, q_chunk, N]; lower q_chunk if it does not fit.
     """
@@ -157,7 +172,7 @@ def torus_attention(q: Tensor, k: Tensor, v: Tensor, geo: TorusGeometry, q_chunk
         if geo.unanchor_text:
             # Unrotated q . k is displacement zero. txt-txt pairs had that anyway (all text is at h=w=0).
             unrotated = dot(q[:, :, rows], k, "h") + dot(q[:, :, rows], k, "w")
-            hw = torch.where(geo.img_img[rows], hw, unrotated)
+            hw = torch.where(geo.txt_pair[rows], unrotated, hw)
         logits = dot(qr, k_rot, "t") + hw + dot(qr, k_rot, "l")
         out.append(torch.softmax(logits, dim=-1).to(v.dtype) @ v)
     return rearrange(torch.cat(out, dim=2), "b h n d -> b n (h d)")
@@ -172,7 +187,8 @@ def torus_forward(
     geo: TorusGeometry,
     q_chunk: int = 512,
 ) -> Tensor:
-    """`Flux2.forward` (model.py:115) with the attention swapped. No weights change, none are added."""
+    """`Flux2.forward` (model.py:115) with the attention swapped. No weights change, none are added.
+    `x` is the image tokens, followed by the reference tokens if the geometry was built with ref_ids."""
     num_txt = geo.num_txt
 
     vec = model.time_in(timestep_embedding(timesteps, 256))
@@ -206,13 +222,16 @@ def torus_forward(
 
 def denoise_torus(
     model: Flux2,
-    img: Tensor,  # [P, N_img, C], one latent per prompt
+    img: Tensor,  # [P, N_img, C] noise, one latent per prompt
     txt: Tensor,  # [3P, N_txt, D]: P empty prompts, P prompts, P prompts + TORUS_PROMPT  (or [2P]: no third block)
     geo: TorusGeometry,
     timesteps: list[float],
     guidance: float,
     geo_guidance: float,
     q_chunk: int = 512,
+    ref: Tensor | None = None,  # [1, N_ref, C] clean reference tokens, seen by every branch
+    keep: Tensor | None = None,  # [1, N_img, 1] bool: tokens that must come out equal to `clean`
+    clean: Tensor | None = None,  # [1, N_img, C] the encoded picture that `keep` refers to
 ) -> Tensor:
     """Euler flow matching with the three-way guidance of reference_code/pipeline_flux2_erp.py:
 
@@ -221,18 +240,26 @@ def denoise_torus(
     The first difference is what the prompt adds over no prompt, the second what the torus sentence
     adds over the prompt alone. With geo_guidance == guidance the v_cond terms cancel and this is
     plain CFG on the long prompt, so the third branch only says something new away from that value.
+
+    `keep`: the flow is x_t = (1 - t) x_0 + t noise, so where x_0 is known, x_t is known at every t.
+    The noise used is the token's own starting noise, which keeps the kept region on one straight
+    trajectory (at t=1 it is what `img` already holds, at t=0 it is exactly `clean`).
     """
+    noise, num_img = img, img.shape[1]
     for t_curr, t_prev in tqdm(list(zip(timesteps[:-1], timesteps[1:])), desc="denoise"):
         t_vec = torch.full((txt.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         branches = txt.shape[0] // img.shape[0]
-        pred = torus_forward(
-            model, img.repeat(branches, 1, 1), t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk
-        )
+        x = img.repeat(branches, 1, 1)
+        if ref is not None:
+            x = torch.cat((x, ref.expand(x.shape[0], -1, -1)), dim=1)
+        pred = torus_forward(model, x, t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk)[:, :num_img]
         v_uncond, v_cond, *v_geo = pred.chunk(branches)
         v = v_uncond + guidance * (v_cond - v_uncond)
         if v_geo:
             v = v + geo_guidance * (v_geo[0] - v_cond)
         img = img + (t_prev - t_curr) * v
+        if keep is not None:
+            img = torch.where(keep, (1 - t_prev) * clean + t_prev * noise, img)
     return img
 
 

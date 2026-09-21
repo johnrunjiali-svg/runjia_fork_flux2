@@ -5,6 +5,8 @@
 3. unanchor_text: rolling the input latent on the torus rolls the output, i.e. the network cannot
    tell where the image was cut. With the text anchored (the default) the same test must fail.
 4. decode_torus returns the right size.
+5. With reference tokens ([txt, img, ref], ref grid larger than the image grid): 1 and 2 again.
+6. denoise_torus with `keep`: kept tokens come out exactly clean, free tokens do not.
 """
 
 import itertools
@@ -15,7 +17,7 @@ from einops import rearrange
 
 from flux2.autoencoder import AutoEncoder, AutoEncoderParams
 from flux2.model import Flux2, rope
-from flux2.torus import build_torus_geometry, decode_torus, torus_attention, torus_forward
+from flux2.torus import build_torus_geometry, decode_torus, denoise_torus, torus_attention, torus_forward
 
 
 @dataclass
@@ -39,6 +41,11 @@ def make_ids(gh: int, gw: int, num_txt: int):
     return x_ids, ctx_ids
 
 
+def make_ref_ids(rh: int, rw: int):
+    zero = torch.arange(1)
+    return torch.cartesian_prod(zero + 10, torch.arange(rh), torch.arange(rw), zero)[None]
+
+
 def roll(tokens, gh, shift):
     """Cyclic shift of a [B, gh * gw, C] token sequence on its grid."""
     grid = torch.roll(rearrange(tokens, "b (h w) c -> b h w c", h=gh), shift, (1, 2))
@@ -46,10 +53,13 @@ def roll(tokens, gh, shift):
 
 
 def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, theta=2000):
-    """The definition, with no trick: logit[p, q] = sum over axes of x_p^T R(displacement) x_q."""
+    """The definition, with no trick: logit[p, q] = sum over axes of x_p^T R(displacement) x_q.
+    Tokens are [txt, img, ref]; the img tokens are the grid[0] * grid[1] right after the text."""
     n_tok = ids.shape[1]
-    is_img = torch.arange(n_tok) >= num_txt
+    index = torch.arange(n_tok)
+    is_img = (index >= num_txt) & (index < num_txt + grid[0] * grid[1])
     img_img = is_img[:, None] & is_img[None, :]
+    txt_pair = (index < num_txt)[:, None] | (index < num_txt)[None, :]
     logits = 0
     for axis in range(4):
         pos = ids[0, :, axis]
@@ -59,7 +69,7 @@ def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, theta=2
             if wrap[axis - 1]:
                 d = torch.where(img_img, (d + n // 2) % n - n // 2, d)
             if unanchor_text:
-                d = torch.where(img_img, d, 0)
+                d = torch.where(txt_pair, 0, d)
         rot = rope(d, 32, theta).double()  # [N, N, 16, 2, 2]
         qa = q[..., 32 * axis : 32 * axis + 32].reshape(*q.shape[:-1], 16, 2).double()
         ka = k[..., 32 * axis : 32 * axis + 32].reshape(*k.shape[:-1], 16, 2).double()
@@ -114,6 +124,49 @@ def main():
             else:
                 assert worst > 1e-5, (tag, worst)
                 print(f"ok   {tag}: NOT roll-equivariant, the text marks the origin ({worst:.1e})")
+
+    # 5
+    gh, gw = 6, 8
+    x_ids, ctx_ids = make_ids(gh, gw, num_txt)
+    ref_ids = make_ref_ids(7, 11)
+    n_ref = ref_ids.shape[1]
+    x_ref = torch.randn(2, gh * gw + n_ref, 8)
+    for wrap, unanchor_text in itertools.product([(True, True), (False, False)], [False, True]):
+        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text, ref_ids)
+        q, k, v = torch.randn(3, 2, 2, num_txt + gh * gw + n_ref, 128).unbind(0)
+        ids = torch.cat((ctx_ids, x_ids, ref_ids), 1)
+        want = pairwise_attention(q, k, v, ids, num_txt, (gh, gw), wrap, unanchor_text)
+        err = (torus_attention(q, k, v, geo, q_chunk=7) - want).abs().max().item()
+        assert err < 1e-5, ("ref", wrap, unanchor_text, err)
+        if wrap == (False, False) and not unanchor_text:
+            out = torus_forward(model, x_ref, t, ctx, None, geo)
+            img_ids = torch.cat((x_ids, ref_ids), 1).expand(2, -1, -1)
+            stock = model(x_ref, img_ids, t, ctx, ctx_ids.expand(2, -1, -1), None)
+            err = (out - stock).abs().max().item()
+            assert err < 1e-4, ("ref stock", err)
+    print("ok   reference tokens: pairwise attention, and wrap off equals stock forward with refs")
+
+    # 6
+    geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), (True, True), False, ref_ids)
+    noise, clean = torch.randn(2, gh * gw, 8), torch.randn(1, gh * gw, 8)
+    keep = torch.rand(1, gh * gw, 1) < 0.5
+    txt = torch.randn(6, num_txt, 12)
+    out = denoise_torus(
+        model,
+        noise,
+        txt,
+        geo,
+        [1.0, 0.6, 0.3, 0.0],
+        4.0,
+        2.0,
+        ref=x_ref[:1, gh * gw :],
+        keep=keep,
+        clean=clean,
+    )
+    kept = keep.expand_as(out)
+    assert torch.equal(out[kept], clean.expand_as(out)[kept])
+    assert (out - clean)[~kept].abs().min() > 1e-4
+    print("ok   keep: kept tokens are exactly clean")
 
     # 4
     ae = AutoEncoder(AutoEncoderParams(ch=32)).eval()

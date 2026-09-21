@@ -230,3 +230,6 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/linux,windows,macos,visualstudiocode,python
 
 output/
+
+# 664 MB gigapixel scan, over GitHub's 100 MB limit; Starry_Night_2k.jpg is the copy to push
+reference_images/Starry_Night.jpg

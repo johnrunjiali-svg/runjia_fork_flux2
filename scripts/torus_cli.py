@@ -1,35 +1,32 @@
-"""Four-way seamless text-to-image with FLUX.2 klein base. The method is in src/flux2/torus.py.
+"""Four-way seamless images with FLUX.2 klein base. Method: src/flux2/torus.py. One-call API: src/flux2/torus_generate.py.
 
+One prompt:
+    PYTHONPATH=src python scripts/torus_cli.py --prompt "seamless rose pattern ..." --name roses --seeds 0,1
+Many prompts (a file has one `name: prompt` per line; several files: a.txt,b.txt, each one a "set"):
     PYTHONPATH=src python scripts/torus_cli.py --prompts_file prompts.txt --seeds 0,1,2,3 --run_name first
     bash scripts/torus_multi_gpu.sh                      the same, sharded over 8 GPUs, then the gallery
 
-A prompts file has one `name: prompt` per line.
-
-Baselines, same seed, same code path:
-    --wrap_h=False --wrap_w=False     stock positions (tiles with visible seams)
+Everything else is an argument of `generate` and is passed through, e.g.
+    --wrap=False,False                stock positions (tiles with visible seams): the baseline
     --geo_guidance=0                  plain CFG, two branches instead of three
     --unanchor_text=True              text no longer marks an origin on the torus (see torus.py)
+    --ref_image a.png                 FLUX.2 image-to-image: a.png is a reference the prompt can talk about
+    --init_image a.png --keep_center 0.7      the middle 70% x 70% of a.png stays untouched, the band
+                                              around it is generated so that the picture tiles
+    --init_image a.png --keep_mask m.png      the same with any region: white = untouched
+    --width 512 --height 512
 
 Unlike scripts/cli.py this loads no content filter (that is a second, 24B model).
 """
 
+import inspect
 import json
 from pathlib import Path
 
-import torch
-from einops import rearrange
 from PIL import Image
-from tqdm import tqdm
 
-from flux2.sampling import batched_prc_img, batched_prc_txt, get_schedule
-from flux2.torus import (
-    DECODE_PAD_TOKENS,
-    TORUS_PROMPT,
-    build_torus_geometry,
-    decode_torus,
-    denoise_torus,
-)
-from flux2.util import FLUX2_MODEL_INFO, load_ae, load_flow_model, load_text_encoder
+from flux2.torus import TORUS_PROMPT
+from flux2.torus_generate import TorusPipe, fit_reference, generate, keep_grid, save_png
 
 
 def read_prompts(path: str) -> list[tuple[str, str]]:
@@ -43,103 +40,73 @@ def read_prompts(path: str) -> list[tuple[str, str]]:
 
 
 def main(
-    prompts_file: str = "prompts.txt",  # or several: a.txt,b.txt  Each file is a "set", named by its stem.
+    prompt: str | None = None,  # one prompt, saved under <run>/single/<name>/ ...
+    name: str = "image",
+    prompts_file: str = "prompts.txt",  # ... or files of prompts, used when --prompt is not given
     seeds: int | tuple = 0,  # one seed or several (0,1,2,3); every prompt is run with every seed
     run_name: str = "run",
     shard: int = 0,  # this process takes jobs[shard::num_shards]; scripts/torus_multi_gpu.sh sets these
     num_shards: int = 1,
     batch_size: int = 6,  # (prompt, seed) jobs per forward; the network sees 3x this. Halve it on out-of-memory.
-    width: int = 256,
-    height: int = 256,
-    num_steps: int = 50,
-    guidance: float = 4.0,
-    geo_guidance: float = 2.0,  # untuned (the reference uses 6 for ERP on FLUX.2-dev); == guidance is plain CFG
-    geo_prompt: str = TORUS_PROMPT,
-    wrap_h: bool = True,
-    wrap_w: bool = True,
-    unanchor_text: bool = False,
-    decode_pad: int = DECODE_PAD_TOKENS,
-    q_chunk: int = 512,
     model_name: str = "flux.2-klein-base-9b",
     output_dir: str = "output",
+    **settings,  # arguments of flux2.torus_generate.generate
 ):
     """Writes  <output_dir>/<run_name>/<set>/<name>/seed<k>.png  and  seed<k>_tiled.png,
     plus config.json and one manifest_<shard>.jsonl that scripts/torus_gallery.py turns into gallery.md."""
-    assert not FLUX2_MODEL_INFO[model_name]["guidance_distilled"], "real CFG needs an undistilled model"
-    config = dict(locals())
-    files = prompts_file.split(",")
+    unknown = set(settings) - set(inspect.signature(generate).parameters)
+    assert not unknown, f"not arguments of generate: {unknown}"  # before minutes of model loading, not after
     seeds = [seeds] if isinstance(seeds, int) else list(seeds)
-    jobs = [
-        (Path(f).stem, name, prompt, seed)
-        for f in files
-        for name, prompt in read_prompts(f)
-        for seed in seeds
-    ][shard::num_shards]
+    if prompt is not None:
+        named = [("single", name, prompt)]
+    else:
+        named = [(Path(f).stem, n, p) for f in prompts_file.split(",") for n, p in read_prompts(f)]
+    jobs = [(set_name, n, p, s) for set_name, n, p in named for s in seeds][shard::num_shards]
 
-    device = torch.device("cuda")
-    wrap = (wrap_h, wrap_w)
-    gh, gw = height // 16, width // 16
     run = Path(output_dir) / run_name
     run.mkdir(parents=True, exist_ok=True)
+    config = {"model_name": model_name, "geo_prompt": TORUS_PROMPT, **settings}
     (run / "config.json").write_text(json.dumps(config, indent=2))
     manifest = (run / f"manifest_{shard}.jsonl").open("w")
 
-    # All the text first, then the text encoder leaves the GPU: on cards without FP8 (A40) the 8B
-    # encoder is dequantized to 16 GB of bf16, and the 9B flow model wants 18 GB of its own.
-    text_encoder = load_text_encoder(model_name, device=device).eval()
-    texts = sorted({t for _, _, p, _ in jobs for t in ("", p, f"{p}. {geo_prompt}")})
-    ctx_of = {}
-    with torch.no_grad():
-        for i in tqdm(range(0, len(texts), 8), desc=f"shard {shard} text"):
-            for t, c in zip(texts[i : i + 8], text_encoder(texts[i : i + 8]).to(torch.bfloat16).cpu()):
-                ctx_of[t] = c
-    del text_encoder
-    torch.cuda.empty_cache()
+    if shard == 0:  # what went in; the gallery shows these on top
+        size = settings.get("width", 256), settings.get("height", 256)
+        if "ref_image" in settings or "init_image" in settings:
+            (run / "inputs").mkdir(exist_ok=True)
+        if "ref_image" in settings:  # exactly what the network is shown
+            ref = fit_reference(settings["ref_image"], settings.get("ref_max_pixels", 512**2))
+            ref.save(run / "inputs" / "ref.png")
+        if "init_image" in settings:
+            Image.open(settings["init_image"]).convert("RGB").resize(size).save(run / "inputs" / "init.png")
 
-    model = load_flow_model(model_name, device=device).eval()
-    ae = load_ae(model_name).eval()
+    pipe = TorusPipe(model_name)
+    geo_prompt = settings.get("geo_prompt", TORUS_PROMPT)
+    pipe.encode_text([t for _, _, p, _ in jobs for t in ("", p, f"{p}. {geo_prompt}")])
+    pipe.drop_text_encoder()
+
+    if shard == 0 and "init_image" in settings:
+        grid = keep_grid(*size, settings.get("keep_mask"), settings.get("keep_center", 0.0))
+        print(f"keeping {int(grid.sum())} of {grid.numel()} tokens untouched")
+        white = grid.repeat_interleave(16, 0).repeat_interleave(16, 1).cpu().numpy()
+        Image.fromarray((white * 255).astype("uint8")).save(run / "inputs" / "keep.png")
 
     for start in range(0, len(jobs), batch_size):
         batch = jobs[start : start + batch_size]
         print(f"shard {shard}: jobs {start + 1}-{start + len(batch)} of {len(jobs)}")
-        with torch.no_grad():
-            texts = [""] * len(batch) + [p for _, _, p, _ in batch]
-            if geo_guidance != 0:
-                texts += [f"{p}. {geo_prompt}" for _, _, p, _ in batch]
-            ctx, ctx_ids = batched_prc_txt(torch.stack([ctx_of[t] for t in texts]).to(device))
-
-            # One generator per job, so an image depends on its seed and not on who shares its batch.
-            randn = torch.cat(
-                [
-                    torch.randn(
-                        (1, 128, gh, gw),
-                        generator=torch.Generator(device="cuda").manual_seed(seed),
-                        dtype=torch.bfloat16,
-                        device="cuda",
-                    )
-                    for _, _, _, seed in batch
-                ]
-            )
-            x, x_ids = batched_prc_img(randn)
-
-            geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text)
-            timesteps = get_schedule(num_steps, x.shape[1])
-            x = denoise_torus(model, x, ctx, geo, timesteps, guidance, geo_guidance, q_chunk)
-
-            x = rearrange(x, "b (h w) c -> b c h w", h=gh, w=gw)
-            x = decode_torus(ae, x, wrap, decode_pad).float()
-
-        x = rearrange(x.clamp(-1, 1), "b c h w -> b h w c")
-        x = (127.5 * (x + 1.0)).cpu().byte()
-        for (set_name, name, prompt, seed), img in zip(batch, x):
-            path = run / set_name / name / f"seed{seed}.png"
+        images = generate(pipe, [p for _, _, p, _ in batch], [s for _, _, _, s in batch], **settings)
+        for (set_name, n, p, s), img in zip(batch, images):
+            path = run / set_name / n / f"seed{s}.png"
             path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(img.numpy()).save(path)
-            # 2x2 tiling: all four seams meet in the middle, where they are easy to look at.
-            Image.fromarray(img.repeat(2, 2, 1).numpy()).save(path.with_name(f"seed{seed}_tiled.png"))
-            record = {"set": set_name, "name": name, "seed": seed, "prompt": prompt}  # gallery sorts by these
-            manifest.write(json.dumps(record) + "\n")
+            save_png(img, path, tiled=True)  # 2x2 tiling: the four seams meet in the middle, easy to look at
+            manifest.write(json.dumps({"set": set_name, "name": n, "seed": s, "prompt": p}) + "\n")
             manifest.flush()
+
+    if (
+        num_shards == 1
+    ):  # a lone process finishes its own run; the multi-GPU launcher does this after all shards
+        from torus_gallery import main as write_gallery
+
+        write_gallery(str(run))
 
 
 if __name__ == "__main__":
