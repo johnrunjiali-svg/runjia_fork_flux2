@@ -92,7 +92,8 @@ def main(
         x = rearrange(x.clamp(-1, 1), "b c h w -> b h w c")
         x = (127.5 * (x + 1.0)).cpu().byte()
         for name, img in zip(names, x):
-            path = out / f"{name}_{len(list(out.glob(f'{name}_*[0-9].png')))}.png"
+            stem = f"{name}_seed{seed}"
+            path = out / f"{stem}_{len(list(out.glob(f'{stem}_*[0-9].png')))}.png"
             Image.fromarray(img.numpy()).save(path)
             # 2x2 tiling: all four seams meet in the middle, where they are easy to look at.
             Image.fromarray(img.repeat(2, 2, 1).numpy()).save(path.with_name(f"{path.stem}_tiled.png"))
