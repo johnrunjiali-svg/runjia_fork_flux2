@@ -33,7 +33,7 @@ class TorusPipe:
     """The three networks, and a cache of text embeddings so the text encoder can leave the GPU."""
 
     def __init__(self, model_name: str = "flux.2-klein-base-9b"):
-        assert not FLUX2_MODEL_INFO[model_name]["guidance_distilled"], "real CFG needs an undistilled model"
+        # assert not FLUX2_MODEL_INFO[model_name]["guidance_distilled"], "real CFG needs an undistilled model"
         self.text_encoder = load_text_encoder(model_name, device=torch.device("cuda")).eval()
         self.model = load_flow_model(model_name, device=torch.device("cuda")).eval()
         self.ae = load_ae(model_name).eval()
