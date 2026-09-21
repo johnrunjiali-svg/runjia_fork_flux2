@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Torus tiles</title>
+<title>Seamless Tiles</title>
 <style>
   :root { --bg:#f6f5f2; --panel:#fff; --ink:#1d1d1b; --dim:#77756f; --line:#dddad2; --accent:#1f7a4d; --keep:31,122,77; }
   @media (prefers-color-scheme: dark) {
@@ -43,21 +43,21 @@
 <main>
   <div>
     <section>
-      <h1>Torus tiles</h1>
-      <p class="hint" style="margin:0 0 12px">FLUX.2 with nearest-copy RoPE: the output tiles seamlessly in all four directions.</p>
+      <h1>Seamless Tiles</h1>
+      <p class="hint" style="margin:0 0 12px">Describe an image. The result repeats seamlessly in every direction.</p>
       <h2>1 · Prompt</h2>
       <textarea id="prompt" spellcheck="false">seamless rose pattern on plain background, irregular scattered roses with long winding stems, elegant floral illustration, organic layout, varied scale</textarea>
     </section>
 
     <section>
-      <h2>2 · Reference images <span style="text-transform:none;letter-spacing:0">(optional, FLUX.2 image-to-image)</span></h2>
+      <h2>2 · Reference images <span style="text-transform:none;letter-spacing:0">(optional, for style or subject)</span></h2>
       <div class="drop" id="refDrop">Drop images here, or click to choose</div>
       <div class="thumbs" id="refThumbs"></div>
       <input type="file" id="refFile" accept="image/*" multiple hidden>
     </section>
 
     <section>
-      <h2>3 · Init image <span style="text-transform:none;letter-spacing:0">(optional, paint what must stay untouched)</span></h2>
+      <h2>3 · Init image <span style="text-transform:none;letter-spacing:0">(optional, turn your own picture into a tile)</span></h2>
       <div class="drop" id="initDrop">Drop one image here, or click to choose</div>
       <input type="file" id="initFile" accept="image/*" hidden>
       <div id="initTools" hidden>
@@ -70,7 +70,7 @@
           <button class="b" id="keepCenter">Keep centre 70%</button><button class="b" id="keepAll">Keep all</button>
           <button class="b" id="keepNone">Clear</button><button class="b" id="initRemove">Remove image</button>
         </div>
-        <p class="hint">Green stays exactly as it is; everything else is generated so the picture wraps. One square = one 16×16 px token, which is the unit the model keeps. Right-drag erases. <span id="keptN"></span></p>
+        <p class="hint">Paint the part to keep. Green stays exactly as it is; the rest is redrawn so the picture repeats seamlessly. Right-drag erases.<span id="keptN" hidden></span></p>
       </div>
     </section>
 
@@ -79,18 +79,20 @@
       <div class="row">
         <label>Size <select id="width"></select> × <select id="height"></select></label>
         <label>Seed <input type="number" id="seed" value="0"></label>
-        <label><input type="checkbox" id="randomSeed"> new seed each run</label>
+        <label><input type="checkbox" id="randomSeed" checked> surprise me</label>
       </div>
-      <div class="row">
-        <label>Steps <input type="number" id="num_steps" value="50" min="1"></label>
-        <label>Guidance <input type="number" id="guidance" value="4" step="0.5"></label>
-        <label>Geo guidance <input type="number" id="geo_guidance" value="2" step="0.5"></label>
-      </div>
-      <div class="row">
-        <label><input type="checkbox" id="wrap" checked> torus wrap (off = stock FLUX.2 baseline)</label>
-        <label><input type="checkbox" id="unanchor_text"> unanchor text</label>
-        <label>Ref max side <select id="refSide"><option>384</option><option selected>512</option><option>768</option><option>1024</option></select></label>
-      </div>
+      <details>
+        <summary class="hint" style="cursor:pointer">Advanced</summary>
+        <div class="row">
+          <label>Quality steps <input type="number" id="num_steps" value="50" min="1"></label>
+          <label>Prompt strength <input type="number" id="guidance" value="4" step="0.5"></label>
+          <label>Seamless strength <input type="number" id="geo_guidance" value="2" step="0.5"></label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="wrap" checked> seamless (turn off to compare with an ordinary image)</label>
+          <label>Reference detail <select id="refSide"><option>384</option><option selected>512</option><option>768</option><option>1024</option></select></label>
+        </div>
+      </details>
     </section>
 
     <button id="go">Generate</button>
@@ -103,8 +105,8 @@
       <h2>Output</h2>
       <div class="outs">
         <figure><img id="outTile" alt=""><figcaption>One tile</figcaption></figure>
-        <figure><img id="outGrid" alt=""><figcaption>2 × 2, pulled apart</figcaption></figure>
-        <figure><img id="outSeamless" alt=""><figcaption>2 × 2, joined: the seams are in the middle</figcaption></figure>
+        <figure><img id="outGrid" alt=""><figcaption>Four copies, side by side</figcaption></figure>
+        <figure><img id="outSeamless" alt=""><figcaption>Four copies joined: can you find the seams?</figcaption></figure>
       </div>
       <p class="hint" id="saved"></p>
     </section>
@@ -113,7 +115,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const TOKEN = 16;
+const CELL = 16;
 
 // ---------- settings ----------
 for (const id of ["width", "height"]) {
@@ -173,8 +175,8 @@ function drawInit(resetMask) {
   const s = Math.max(W / initImg.naturalWidth, H / initImg.naturalHeight);
   const sw = W / s, sh = H / s;
   base.getContext("2d").drawImage(initImg, (initImg.naturalWidth - sw) / 2, (initImg.naturalHeight - sh) / 2, sw, sh, 0, 0, W, H);
-  if (resetMask || gw !== W / TOKEN || gh !== H / TOKEN) {
-    gw = W / TOKEN; gh = H / TOKEN; mask.width = gw; mask.height = gh;
+  if (resetMask || gw !== W / CELL || gh !== H / CELL) {
+    gw = W / CELL; gh = H / CELL; mask.width = gw; mask.height = gh;
     keep = new Uint8Array(gw * gh);
     fillCenter(0.7);
   }
@@ -183,10 +185,8 @@ function drawInit(resetMask) {
 function drawMask() {
   const ctx = mask.getContext("2d"), px = ctx.createImageData(gw, gh);
   const rgb = getComputedStyle(document.documentElement).getPropertyValue("--keep").split(",").map(Number);
-  let n = 0;
-  for (let i = 0; i < keep.length; i++) { px.data.set([...rgb, keep[i] ? 120 : 0], i * 4); n += keep[i]; }
+  for (let i = 0; i < keep.length; i++) { px.data.set([...rgb, keep[i] ? 120 : 0], i * 4); }
   ctx.putImageData(px, 0, 0);
-  $("keptN").textContent = `${n} of ${keep.length} tokens kept.`;
 }
 function fillCenter(f) {
   const mh = Math.round(gh * (1 - f) / 2), mw = Math.round(gw * (1 - f) / 2);
@@ -229,23 +229,24 @@ $("go").onclick = async () => {
   const body = {
     prompt: $("prompt").value.trim(), refs, init: initImg ? base.toDataURL("image/png") : null, keep: initImg ? rows : null,
     settings: { width: num("width"), height: num("height"), seed: num("seed"), num_steps: num("num_steps"), guidance: num("guidance"),
-      geo_guidance: num("geo_guidance"), wrap: $("wrap").checked, unanchor_text: $("unanchor_text").checked, ref_max_pixels: side * side },
+      geo_guidance: num("geo_guidance"), wrap: $("wrap").checked, unanchor_text: false, ref_max_pixels: side * side },
   };
   if (!body.prompt) return status("Write a prompt first.", true);
 
-  $("go").disabled = true; status("Encoding…"); const t0 = Date.now();
+  $("go").disabled = true; status("Starting…"); const t0 = Date.now();
   const poll = setInterval(async () => {
     const p = await (await fetch("/progress")).json();
-    if (p.total) { document.querySelector("#bar i").style.width = 100 * p.step / p.total + "%"; status(`Step ${p.step} / ${p.total} · ${((Date.now() - t0) / 1000).toFixed(0)} s`); }
+    if (p.total) { document.querySelector("#bar i").style.width = 100 * p.step / p.total + "%"; status(`Drawing… ${Math.round(100 * p.step / p.total)}%`); }
   }, 500);
   try {
     const res = await fetch("/generate", { method: "POST", body: JSON.stringify(body) }), out = await res.json();
+    if (res.status === 409) { status("Busy with another picture. Try again in a moment.", true); return; }
     if (!res.ok) throw new Error(out.error);
     $("outTile").src = out.tile; $("outGrid").src = out.grid; $("outSeamless").src = out.seamless;
-    $("saved").textContent = `Saved on the server as ${out.saved}_{tile,grid,seamless}.png · seed ${body.settings.seed}`;
+    $("saved").textContent = `Seed ${body.settings.seed}. Right-click an image to save it.`;
     status(`Done in ${((Date.now() - t0) / 1000).toFixed(0)} s.`);
-  } catch (e) { status(e.message, true); }
-  clearInterval(poll); document.querySelector("#bar i").style.width = "0"; $("go").disabled = false;
+  } catch (e) { console.error(e); status("Something went wrong. Try a smaller size or fewer reference images.", true); }
+  finally { clearInterval(poll); document.querySelector("#bar i").style.width = "0"; $("go").disabled = false; }
 };
 </script>
 </body>
