@@ -112,7 +112,7 @@ def generate(
     height: int = 256,
     num_steps: int = 50,
     guidance: float = 4.0,
-    geo_guidance: float = 2.0,  # untuned (the reference uses 6 for ERP on FLUX.2-dev); == guidance is plain CFG
+    geo_guidance: float = 6.0,  # untuned (the reference uses 6 for ERP on FLUX.2-dev); == guidance is plain CFG
     geo_prompt: str = TORUS_PROMPT,
     wrap: tuple[bool, bool] = (True, True),  # (h, w)
     unanchor_text: bool = False,
