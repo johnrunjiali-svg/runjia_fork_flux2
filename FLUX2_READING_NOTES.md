@@ -25,6 +25,7 @@ Codebase size: **3,132 lines** across 9 Python files. Inference only — no trai
   - [Q4. What do `prc` and `pe` stand for?](#q4-what-do-prc-and-pe-stand-for)
   - [Q5. What is modulation?](#q5-what-is-modulation)
   - [Q6. Correction — "collide at the origin"](#q6-correction--text-and-image-collide-at-the-origin)
+- [Session 2 — Torus attention (nearest-copy RoPE)](#session-2--torus-attention-nearest-copy-rope)
 - [Running log of useful facts](#running-log-of-useful-facts)
 
 ---
@@ -829,6 +830,69 @@ the same attention heads, and the same modulation values**. They share everythin
   For every text token, 3 of the 4 axes sit at position 0, so 96 of 128 q/k dimensions receive
   the identity rotation. That's a large amount of unused positional bandwidth — either free
   capacity to repurpose, or evidence that the `[32,32,32,32]` split is generous by design.
+
+---
+
+# Session 2 — Torus attention (nearest-copy RoPE)
+
+Code: `src/flux2/torus.py` (method), `scripts/torus_cli.py` (run on the server),
+`scripts/torus_selftest.py` (CPU, seconds, toy weights). Stock files untouched.
+
+## The method in one line
+
+Keep every RoPE frequency; replace the displacement `d = q - p` by its nearest periodic copy
+`d_near = ((d + n/2) mod n) - n/2`, per axis, for image-image pairs. Every query sits in the
+middle of its own image. `|d_near| <= n/2`, so no rotation is out of the training range.
+(Same thing as the "minimum image convention" in periodic-boundary simulations.)
+
+## What makes it cheap
+
+- `d_near` is `d`, `d - n` or `d + n`, so `R(d_near) = R(p)^T R(q + s n)`: queries rotate as in
+  stock, only keys come in shifted copies.
+- **Two copies per key, not three**: key `q` with `2q < n` is only ever wanted at `q` or `q + n`,
+  otherwise at `q` or `q - n`. Asserted at build time on the `[n, n]` coordinate table.
+- **The axes separate.** `R` is block diagonal over `(t, h, w, l)`, so
+  `logit = L_t + L_h + L_w + L_l` and the h-wrap only selects inside `L_h`, the w-wrap inside
+  `L_w`. 2D costs `1 + 2 + 2 + 1 = 6` partial matmuls over 32 dims = **1.5x** the stock `QK^T`,
+  not 4x or 9x. One `apply_rope` with `pe_copy` (h and w both moved) yields both key copies,
+  because h and w occupy different head dims (`[32:64]` and `[64:96]`).
+- Cost that cannot be avoided: which copy is used depends on the query, so the logits must be
+  materialized and SDPA/flash is out. `torus_attention` chunks over queries; peak is about
+  8 float32 tensors of `[B, heads, q_chunk, N]` (B=3, 1024^2, q_chunk=512: ~5 GB).
+  Possible later: keep SDPA by stacking the 4 key copies and passing a boolean `[N, 4N]` mask.
+
+## Two non-forced choices
+
+- **Tie at `d = +-n/2` (even n).** Half-open `[-n/2, n/2)`, so `d_near` depends on
+  `(q - p) mod n` only; that is what makes cyclic-shift equivariance exact. Keeping the raw
+  `+-n/2` would be antisymmetric in `(p, q)` but not shift invariant.
+- **Text is an anchor.** Text tokens sit at `(h=0, w=0)`, so an image token at `(h, w)` sees text
+  at `(-h, -w)`: through text, every image token knows its absolute position (follows from the
+  Q6 table above). Wrapping img-img alone therefore does *not* make the network
+  shift-equivariant. `unanchor_text=True` uses zero h/w displacement for every pair involving
+  text (unrotated `q.k` on those dims); then rolling the input latent rolls the output to 5e-7
+  on the toy model. Default is off = least change from training. Which one gives better tiles
+  is an open experimental question.
+
+## Verified on CPU (toy weights)
+
+- `torus_attention` == pairwise brute force from `d_near` (even, odd and 2x3 grids, torus /
+  cylinder / off, both text modes): < 1e-5.
+- wrap off: `torus_forward` == stock `Flux2.forward` to 5e-7 (fp32); in bf16 the difference from
+  SDPA is exactly one bf16 ulp.
+- The anchored default is measurably *not* roll-equivariant (negative control).
+
+## Guidance
+
+`v = v_u + g (v_c - v_u) + gamma (v_geo - v_c)`, three branches batched as B=3
+(150 forwards for 50 steps). Identity worth remembering: **`gamma == g` collapses to plain CFG on
+the long prompt**; the third branch only matters away from that. `gamma = 6` is the reference's
+ERP default on FLUX.2-dev, untuned for klein-base.
+
+## Pixel-level seam
+
+The AE decoder zero-pads its convs, so the latent is circularly padded by 9 tokens (= the ~18
+latent-pixel one-sided receptive field) before `ae.decode` and cropped after (`decode_torus`).
 
 ---
 
