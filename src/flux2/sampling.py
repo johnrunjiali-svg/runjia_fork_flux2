@@ -33,7 +33,7 @@ def scatter_ids(x: Tensor, x_ids: Tensor) -> list[Tensor]:
         h_ids = pos[:, 1].to(torch.int64)
         w_ids = pos[:, 2].to(torch.int64)
 
-        t_ids_cmpr = compress_time(t_ids)
+        t_ids_cmpr = compress_time(t_ids) # time here is really reference group
 
         t = torch.max(t_ids_cmpr) + 1
         h = torch.max(h_ids) + 1
