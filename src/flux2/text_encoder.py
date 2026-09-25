@@ -215,9 +215,11 @@ class Mistral3SmallEmbedder(nn.Module):
             return txt
 
     @torch.no_grad()
-    def forward(self, txt: list[str]):
+    def forward(self, txt: list[str], system_message: str | None = None):
+        """`system_message` overrides SYSTEM_MESSAGE for this call. The embedding is the hidden
+        states of the whole chat, system turn included, so it is part of the conditioning."""
         # Format input messages
-        messages_batch = self.format_input(txt=txt)
+        messages_batch = self.format_input(txt=txt, system_message=system_message or SYSTEM_MESSAGE)
 
         # Process all messages at once
         # with image processing a too short max length can throw an error in here.
@@ -381,12 +383,15 @@ class Qwen3Embedder(nn.Module):
         self.max_length = MAX_LENGTH
 
     @torch.no_grad()
-    def forward(self, txt: list[str]):
+    def forward(self, txt: list[str], system_message: str | None = None):
+        """The klein models were conditioned on a bare user turn, which is what an empty or absent
+        `system_message` gives. A non-empty one puts a system turn in front of every prompt."""
         all_input_ids = []
         all_attention_masks = []
 
+        system = [{"role": "system", "content": system_message}] if system_message else []
         for prompt in txt:
-            messages = [{"role": "user", "content": prompt}]
+            messages = [*system, {"role": "user", "content": prompt}]
             text = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,

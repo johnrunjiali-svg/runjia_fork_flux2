@@ -91,7 +91,8 @@ def main(
 
     pipe = TorusPipe(model_name)
     geo_prompt = settings.get("geo_prompt", TORUS_PROMPT)
-    pipe.encode_text([t for _, _, p, _ in jobs for t in ("", p, f"{p}. {geo_prompt}")])
+    system_prompt = settings.get("system_prompt") or None
+    pipe.encode_text([t for _, _, p, _ in jobs for t in ("", p, f"{p}. {geo_prompt}")], system_prompt)
     pipe.drop_text_encoder()
 
     if shard == 0 and "init_image" in settings:

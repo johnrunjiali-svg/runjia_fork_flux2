@@ -9,6 +9,8 @@
 6. denoise_torus with `keep`: kept tokens come out exactly clean, free tokens do not -- from pure
    noise, and from a partially noised start (t_start) with the noise handed in separately.
 7. schedule_from: starts at exactly t_start, ends at 0, strictly decreasing, t_start=1 is stock.
+8. guidance_weights: a branch whose weight is zero can be left out of the batch and the sampler
+   follows the same trajectory -- what makes guidance = 1 cost half a step, or a third of one.
 """
 
 import itertools
@@ -185,6 +187,37 @@ def main():
             assert len(s) == num_steps + 1 and abs(s[0] - t_start) < 1e-6 and s[-1] == 0.0, (t_start, s)
             assert all(a > b for a, b in zip(s, s[1:])), (t_start, s)
     print("ok   schedule_from: starts at t_start, ends at 0, strictly decreasing")
+
+    # 8
+    steps = [1.0, 0.6, 0.3, 0.0]
+    cond, geo_txt = txt[2:4], txt[4:6]
+    for guidance, geo_guidance, blocks in ((4.0, 2.0, 2), (4.0, 0.0, 1)):
+        # With the unconditional block equal to the conditional one, v_uncond == v_cond and the
+        # three-branch sum collapses to what guidance = 1 computes from `blocks` fewer blocks.
+        # Same velocity, same trajectory: the branch `guidance_weights` drops is genuinely dead.
+        full = denoise_torus(
+            model,
+            noise,
+            torch.cat((cond, cond, geo_txt))[: 2 * (blocks + 1)],
+            geo,
+            steps,
+            guidance,
+            geo_guidance,
+            ref=x_ref[:1, gh * gw :],
+        )
+        few = denoise_torus(
+            model,
+            noise,
+            torch.cat((cond, geo_txt))[: 2 * blocks],
+            geo,
+            steps,
+            1.0,
+            geo_guidance,
+            ref=x_ref[:1, gh * gw :],
+        )
+        err = (full - few).abs().max().item()
+        assert err < 1e-4, (guidance, geo_guidance, err)
+    print("ok   guidance_weights: dropping a zero-weight branch leaves the trajectory unchanged")
 
     # 4
     ae = AutoEncoder(AutoEncoderParams(ch=32)).eval()

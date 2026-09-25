@@ -231,10 +231,27 @@ def torus_forward(
     return model.final_layer(img, vec)
 
 
+def guidance_weights(guidance: float, geo_guidance: float) -> list[float]:
+    """The weights of [v_uncond, v_cond, v_geo] in the three-way guidance of `denoise_torus`:
+
+        v = v_uncond + guidance (v_cond - v_uncond) + geo_guidance (v_geo - v_cond)
+          = (1 - guidance) v_uncond + (guidance - geo_guidance) v_cond + geo_guidance v_geo
+
+    A branch whose weight is zero contributes nothing, so it is not computed at all: `generate`
+    leaves its prompt out of the batch and `denoise_torus` is handed that many fewer blocks. The
+    three cases that matters for are guidance = 1 (the distilled klein models' fixed value: the
+    unconditional branch drops out, halving a step, or cutting it to a third when geo_guidance is
+    also on), geo_guidance = 0 (no torus sentence), and geo_guidance = guidance (plain CFG on the
+    long prompt, where the middle branch drops out -- the cancellation this file's docstring notes).
+    """
+    return [1.0 - guidance, guidance - geo_guidance, geo_guidance]
+
+
 def denoise_torus(
     model: Flux2,
     img: Tensor,  # [P, N_img, C] noise, one latent per prompt
-    txt: Tensor,  # [3P, N_txt, D]: P empty prompts, P prompts, P prompts + TORUS_PROMPT  (or [2P]: no third block)
+    txt: Tensor,  # [BP, N_txt, D]: the branches of `guidance_weights` that carry a nonzero weight,
+    #               in order: P empty prompts, P prompts, P prompts + TORUS_PROMPT
     geo: TorusGeometry,
     timesteps: list[float],
     guidance: float,
@@ -254,6 +271,10 @@ def denoise_torus(
     adds over the prompt alone. With geo_guidance == guidance the v_cond terms cancel and this is
     plain CFG on the long prompt, so the third branch only says something new away from that value.
 
+    How many blocks `txt` has says which branches the caller kept: `guidance_weights` turns the two
+    numbers into one weight per branch, and the branches with weight zero are not passed in and not
+    run. The blocks that are passed stay in the order (uncond, cond, geo).
+
     `keep`: the flow is x_t = (1 - t) x_0 + t noise, so where x_0 is known, x_t is known at every t.
     The noise used is the token's own starting noise, which keeps the kept region on one straight
     trajectory (at t=1 it is pure noise, at t=0 it is exactly `clean`).
@@ -270,10 +291,9 @@ def denoise_torus(
         if ref is not None:
             x = torch.cat((x, ref.expand(x.shape[0], -1, -1)), dim=1)
         pred = torus_forward(model, x, t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk)[:, :num_img]
-        v_uncond, v_cond, *v_geo = pred.chunk(branches)
-        v = v_uncond + guidance * (v_cond - v_uncond)
-        if v_geo:
-            v = v + geo_guidance * (v_geo[0] - v_cond)
+        weights = [w for w in guidance_weights(guidance, geo_guidance) if w != 0]
+        assert len(weights) == branches, f"{branches} text blocks for weights {weights}"
+        v = sum(w * p for w, p in zip(weights, pred.chunk(branches)))
         img = img + (t_prev - t_curr) * v
         if keep is not None:
             img = torch.where(keep, (1 - t_prev) * clean + t_prev * noise, img)

@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roll · Mask · Generate</title>
+<style>
+  :root { --bg:#f6f5f2; --panel:#fff; --ink:#1d1d1b; --dim:#77756f; --line:#dddad2; --accent:#1f7a4d; --a:31,122,77; --warn:#d2452f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --panel:#20201e; --ink:#ecebe6; --dim:#97958d; --line:#383733; --accent:#4cc38a; --a:76,195,138; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 ui-sans-serif,system-ui,sans-serif; }
+  main { max-width:1600px; margin:0 auto; padding:18px 16px 56px; }
+  h1 { font-size:16px; margin:0 0 3px; }
+  h2 { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); margin:0 0 9px; font-weight:600; }
+  h2 span { text-transform:none; letter-spacing:0; font-weight:400; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .cols { display:grid; gap:14px; grid-template-columns:minmax(340px,460px) 1fr; align-items:start; }
+  @media (max-width:1000px) { .cols { grid-template-columns:1fr; } }
+  .pair { display:grid; gap:16px; grid-template-columns:1fr 1fr; }
+  @media (max-width:860px) { .pair { grid-template-columns:1fr; } }
+  textarea { width:100%; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:9px; background:transparent; color:inherit; font:inherit; }
+  .drop { border:1.5px dashed var(--line); border-radius:8px; padding:14px; text-align:center; color:var(--dim); cursor:pointer; transition:.12s; }
+  .drop.over { border-color:var(--accent); color:var(--accent); background:rgba(var(--a),.07); }
+  .thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; } .thumbs:empty { display:none; }
+  .thumb { position:relative; } .thumb img { height:68px; border-radius:5px; display:block; background:var(--line); }
+  .thumb button { position:absolute; top:-6px; right:-6px; width:20px; height:20px; border-radius:50%; border:0; background:var(--ink); color:var(--bg); cursor:pointer; line-height:1; padding:0; }
+  canvas { width:100%; display:block; border-radius:6px; background:var(--line); image-rendering:auto; }
+  .stage { position:relative; line-height:0; touch-action:none; user-select:none; }
+  #board { cursor:grab; } #board.drag { cursor:grabbing; }
+  #view { cursor:crosshair; }
+  .row { display:flex; flex-wrap:wrap; gap:7px 13px; align-items:center; margin-top:9px; }
+  label { color:var(--dim); display:flex; gap:6px; align-items:center; } label b { color:var(--ink); font-weight:500; }
+  input[type=number] { width:72px; } input[type=number], select { padding:4px 6px; border:1px solid var(--line); border-radius:5px; background:transparent; color:inherit; font:inherit; }
+  input:disabled { opacity:.45; }
+  button.b { border:1px solid var(--line); background:transparent; color:inherit; border-radius:6px; padding:4px 9px; cursor:pointer; font:inherit; }
+  button.b:hover { border-color:var(--accent); }
+  button.b.on { border-color:var(--accent); color:var(--accent); background:rgba(var(--a),.08); }
+  #go { width:100%; padding:11px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:600 15px inherit; cursor:pointer; margin-top:4px; }
+  #go:disabled { opacity:.55; cursor:default; }
+  #bar { height:4px; border-radius:2px; background:var(--line); margin-top:10px; overflow:hidden; } #bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .3s; }
+  #status { color:var(--dim); margin-top:6px; min-height:1.4em; } #status.err { color:var(--warn); }
+  .hint { color:var(--dim); margin:8px 0 0; } .hint.tight { margin-top:4px; }
+  figure { margin:0; } figure img { width:100%; border-radius:6px; display:block; background:var(--line); min-height:120px; }
+  #history { display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; } #history:empty::after { content:"nothing yet"; color:var(--dim); }
+  #history img { height:64px; border-radius:5px; display:block; cursor:pointer; border:2px solid transparent; }
+  #history img.on { border-color:var(--accent); }
+  code { font:12px ui-monospace,monospace; color:var(--dim); }
+  details summary { cursor:pointer; color:var(--dim); }
+</style>
+</head>
+<body>
+<main>
+
+<section>
+  <h1>Roll · Mask · Generate</h1>
+  <p class="hint tight" style="margin-top:2px">
+    Two stages that meet at one picture. <b>Upstairs</b> you cut the tile somewhere else and paint the part you
+    want redrawn pure white. <b>Downstairs</b> FLUX.2 is handed that picture as an ordinary reference and told
+    to fill the white in. No mask channel and no inpainting model: the white hole is the instruction.
+    <code id="model"></code>
+  </p>
+</section>
+
+<!-- ─────────────────────────── stage 1: the studio ─────────────────────────── -->
+<section>
+  <h2>1 · Reference studio <span>— rolling and masking happen here in the browser; the GPU never sees this part</span></h2>
+
+  <div class="drop" id="srcDrop">Drop the picture to work on, or click to choose</div>
+
+  <div id="studio" hidden>
+    <div class="row">
+      <label>Tile <input type="number" id="tw" step="16" min="64"> × <input type="number" id="th" step="16" min="64"></label>
+      <button class="b" id="fitSrc">Fit source</button>
+      <button class="b" data-size="512">512²</button><button class="b" data-size="768">768²</button><button class="b" data-size="1024">1024²</button>
+      <button class="b" id="srcRemove">Remove picture</button>
+    </div>
+    <p class="hint tight">Sides are rounded to a multiple of 16 (one token). The picture is cover-cropped to fit, never squashed.</p>
+
+    <div class="pair" style="margin-top:14px">
+      <div>
+        <h2 style="margin-bottom:6px">Roll <span>— drag the window</span></h2>
+        <div class="stage"><canvas id="board"></canvas></div>
+        <div class="row">
+          <label>dx <input type="number" id="dx" step="16" value="0"></label>
+          <label>dy <input type="number" id="dy" step="16" value="0"></label>
+          <label><input type="checkbox" id="snap" checked> snap 16</label>
+        </div>
+        <div class="row">
+          <button class="b" id="halfX">½ across</button><button class="b" id="halfY">½ down</button>
+          <button class="b" id="halfBoth">½ both</button><button class="b" id="rollReset">Reset</button>
+        </div>
+        <p class="hint tight">Four copies of the tile; the bright window is the tile you keep. Slide it and the tile's own
+          edges — the green lines — move into the open, where they can be painted over and redrawn.</p>
+      </div>
+
+      <div>
+        <h2 style="margin-bottom:6px">Mask <span>— paint what the model should redraw</span></h2>
+        <div class="stage"><canvas id="view"></canvas></div>
+        <div class="row">
+          <button class="b on" id="toolBrush">Brush</button><button class="b" id="toolRect">Rectangle</button>
+          <button class="b" id="toolErase">Erase</button>
+          <label>Size <input type="range" id="brush" min="4" max="256" step="4" value="48" style="width:90px"><b id="brushN">48</b></label>
+        </div>
+        <div class="row">
+          <label>Band <input type="number" id="thick" step="16" value="128" min="16"></label>
+          <button class="b" id="pV" title="a vertical stripe on the left–right join">down the seam</button>
+          <button class="b" id="pH" title="a horizontal stripe on the top–bottom join">across the seam</button>
+          <button class="b" id="pCross" title="both joins at once: all four edges, corners included">both</button>
+          <button class="b" id="pSquare">centre square</button>
+        </div>
+        <div class="row">
+          <button class="b" id="mInvert">Invert</button><button class="b" id="mClear">Clear</button>
+          <button class="b" id="mUndo">Undo</button>
+          <label><input type="checkbox" id="asWhite"> show as real white</label>
+        </div>
+        <p class="hint tight" id="maskInfo"></p>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <button class="b" id="dlRef">Download this reference (.png)</button>
+      <span class="hint" style="margin:0">This one file is the whole hand-off: drop it back in later and the run repeats.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────── stage 2: generate, and the output ─────────────────────── -->
+<div class="cols">
+  <div>
+    <section>
+      <h2>2 · What to do with it</h2>
+      <textarea id="prompt" rows="6" spellcheck="false"></textarea>
+      <div class="row"><button class="b" id="promptReset">Default fill prompt</button><button class="b" id="promptClear">Clear</button></div>
+
+      <h2 style="margin:16px 0 9px">System prompt <span>— the turn in front of every prompt</span></h2>
+      <textarea id="system" rows="4" spellcheck="false" placeholder="empty: no system turn at all, which is how the klein models were trained"></textarea>
+      <div class="row" id="systemPresets"></div>
+      <p class="hint tight">Changing this re-encodes the prompt (a second or two on the first use of each wording); after
+        that it is cached. It is part of the conditioning, so the same prompt under two system turns is two different runs.</p>
+    </section>
+
+    <section>
+      <h2>Reference images</h2>
+      <div class="row" style="margin-top:0">
+        <div class="thumb" id="refMain" hidden><img id="refThumb" alt=""><button title="clear" id="refClear">×</button></div>
+        <div style="flex:1;min-width:180px">
+          <div class="drop" id="refDrop" style="padding:10px">Masked reference — from the studio above, or drop a saved one</div>
+        </div>
+      </div>
+      <p class="hint tight" id="refInfo">No reference yet: this would be plain text-to-image.</p>
+      <div class="drop" id="extraDrop" style="padding:10px;margin-top:10px">Extra references (style, palette, a motif to borrow) — optional</div>
+      <div class="thumbs" id="extraThumbs"></div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <div class="row" style="margin-top:0">
+        <label>Seed <input type="number" id="seed" value="0"></label>
+        <label><input type="checkbox" id="randomSeed" checked> surprise me</label>
+      </div>
+      <div class="row">
+        <label>Steps <input type="number" id="num_steps" value="4" min="1"></label>
+        <label>Prompt strength <input type="number" id="guidance" value="1" step="0.5" min="0"></label>
+        <label>Seamless strength <input type="number" id="geo_guidance" value="2" step="0.5" min="0"></label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="wrap" checked> <b>seamless</b> — the result repeats in every direction</label>
+      </div>
+      <p class="hint tight">Turning seamless off sets the seamless strength to 0 and leaves an ordinary FLUX.2 edit — which is
+        what you want when the picture is not a tile. Prompt strength 1 is the distilled models' fixed value, and it costs
+        nothing: the unconditional branch drops out of every step.</p>
+      <details style="margin-top:10px">
+        <summary class="hint">Advanced</summary>
+        <div class="row">
+          <label><input type="checkbox" id="sizeLock" checked> output matches the reference</label>
+          <label>Size <input type="number" id="ow" step="16" disabled> × <input type="number" id="oh" step="16" disabled></label>
+        </div>
+        <div class="row">
+          <label>Reference detail <select id="refSide"><option>384</option><option>512</option><option>768</option><option selected>1024</option><option>1536</option></select></label>
+          <label><input type="checkbox" id="unanchor_text"> unanchor text</label>
+        </div>
+        <p class="hint tight">Reference detail caps the reference's area. Below the tile's own size it is resampled, which softens
+          the white edges the prompt is pointing at; above it costs attention tokens and nothing else.</p>
+        <h2 style="margin:14px 0 6px">Seamless sentence <span>— appended for the third guidance branch</span></h2>
+        <textarea id="geo_prompt" rows="4" spellcheck="false"></textarea>
+        <div class="row"><button class="b" id="geoReset">Default</button></div>
+      </details>
+    </section>
+
+    <button id="go">Generate</button>
+    <div id="bar"><i></i></div>
+    <div id="status"></div>
+  </div>
+
+  <div>
+    <section>
+      <h2>Output</h2>
+      <div class="row" style="margin-top:0">
+        <button class="b on" data-view="tile">One tile</button>
+        <button class="b" data-view="unrolled">Unrolled</button>
+        <button class="b" data-view="seamless">2 × 2 joined</button>
+        <button class="b" data-view="grid">2 × 2 apart</button>
+      </div>
+      <figure style="margin-top:10px"><img id="out" alt=""></figure>
+      <div class="row">
+        <button class="b" id="toStudio">Send to the studio ↻</button>
+        <button class="b" id="dlOut">Download this view</button>
+        <button class="b" id="saveRun">Save run (.zip)</button>
+        <button class="b" id="saveAll">Save session (.zip)</button>
+      </div>
+      <p class="hint tight" id="saved"></p>
+    </section>
+
+    <section>
+      <h2>This session</h2>
+      <div id="history"></div>
+    </section>
+  </div>
+</div>
+
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const CELL = 16;
+const snap16 = v => Math.round(v / CELL) * CELL;              // offsets: 0 is a perfectly good one
+const round16 = v => Math.max(CELL, snap16(v));               // sizes: at least one token
+const floor16 = v => Math.max(CELL, Math.floor(v / CELL) * CELL);   // fitting a source: never upscale
+const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ───────────────────────── defaults from the server ─────────────────────────
+let INFO = { fill_prompt: "", geo_prompt: "", system_presets: {} };
+fetch("/info").then(r => r.json()).then(info => {
+  INFO = info;
+  $("model").textContent = info.model_name;
+  $("prompt").value ||= info.fill_prompt;
+  $("geo_prompt").value ||= info.geo_prompt;
+  $("num_steps").value = info.defaults.num_steps;
+  $("guidance").value = info.defaults.guidance;
+  for (const [name, text] of Object.entries(info.system_presets)) {
+    const b = document.createElement("button");
+    b.className = "b"; b.textContent = name;
+    b.onclick = () => { $("system").value = text; };
+    $("systemPresets").append(b);
+  }
+}).catch(() => status("Could not reach the server.", true));
+
+// ───────────────────────────── files in and out ─────────────────────────────
+function dropzone(zone, onFiles) {
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = "image/*"; input.multiple = true; input.hidden = true;
+  zone.after(input);
+  zone.onclick = () => input.click();
+  input.onchange = () => { onFiles([...input.files]); input.value = ""; };
+  for (const ev of ["dragenter", "dragover"]) zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.remove("over"); });
+  zone.addEventListener("drop", e => onFiles([...e.dataTransfer.files].filter(f => f.type.startsWith("image/"))));
+}
+window.addEventListener("dragover", e => e.preventDefault());   // a missed drop must not navigate away
+window.addEventListener("drop", e => e.preventDefault());
+
+const loadImage = src => new Promise((ok, bad) => {
+  const img = new Image();
+  img.onload = () => ok(img);
+  img.onerror = () => bad(new Error("could not read that image"));
+  img.src = src instanceof Blob ? URL.createObjectURL(src) : src;
+});
+function download(href, name) {
+  const a = document.createElement("a");
+  a.href = href; a.download = name; a.click();
+}
+function canvasOf(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  return c;
+}
+
+// ─────────────────────────────── the studio ───────────────────────────────
+// src   : the picture, cover-cropped to W x H          (never touched again)
+// tile  : src rolled by (dx, dy)                       (redrawn on every move)
+// mask  : opaque white where the model should redraw   (painted by hand, wraps)
+// ref   : tile with mask burned in                     (what the GPU is shown)
+let W = 512, H = 512, dx = 0, dy = 0;
+let srcImg = null;
+const src = canvasOf(W, H), tile = canvasOf(W, H), mask = canvasOf(W, H), tint = canvasOf(W, H);
+const board = $("board"), view = $("view");
+const undos = [];
+
+function setSize(w, h) {
+  W = round16(w); H = round16(h);
+  $("tw").value = W; $("th").value = H;
+  if ($("sizeLock").checked) { $("ow").value = W; $("oh").value = H; }
+  for (const c of [src, tile, mask, tint]) { c.width = W; c.height = H; }
+  board.width = 2 * W; board.height = 2 * H;
+  view.width = W; view.height = H;
+  dx = Math.min(dx, W - 1); dy = Math.min(dy, H - 1);
+  undos.length = 0;
+  drawSrc();
+}
+function drawSrc() {
+  if (!srcImg) return;
+  const k = Math.max(W / srcImg.naturalWidth, H / srcImg.naturalHeight);   // cover crop, never squash
+  const sw = W / k, sh = H / k;
+  const ctx = src.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(srcImg, (srcImg.naturalWidth - sw) / 2, (srcImg.naturalHeight - sh) / 2, sw, sh, 0, 0, W, H);
+  drawAll();
+}
+function drawAll() { drawBoard(); drawTile(); drawView(); refresh(); }
+
+// Everything that costs real time -- reading the mask back, re-encoding the reference for the
+// thumbnail -- happens here, well after the last pointer event, never once per mousemove.
+let pending = 0, painted = 0;
+function refresh() {
+  clearTimeout(pending);
+  pending = setTimeout(() => { painted = maskedFraction(); describe(); syncRef(); }, 180);
+}
+function describe() {
+  $("maskInfo").textContent = painted
+    ? `${(100 * painted).toFixed(1)}% of the tile is white. The dashed lines are the tile's own edges: mask across them and the model draws the join the repeat will make.`
+    : "Nothing painted yet. The dashed lines are the tile's own edges \u2014 the joins that have to be drawn across.";
+}
+
+function drawBoard() {
+  const ctx = board.getContext("2d");
+  const four = () => { for (const y of [0, H]) for (const x of [0, W]) ctx.drawImage(src, x, y); };
+  ctx.clearRect(0, 0, 2 * W, 2 * H);
+  four();
+  ctx.fillStyle = "rgba(0,0,0,.55)";
+  ctx.fillRect(0, 0, 2 * W, 2 * H);
+  ctx.save(); ctx.beginPath(); ctx.rect(dx, dy, W, H); ctx.clip(); four(); ctx.restore();
+  const line = Math.max(2, W / 200);
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = line;
+  ctx.strokeRect(dx, dy, W, H);
+  ctx.strokeStyle = cssVar("--accent");
+  ctx.setLineDash([line * 4, line * 3]);
+  for (const x of [0, W, 2 * W]) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 2 * H); ctx.stroke(); }
+  for (const y of [0, H, 2 * H]) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(2 * W, y); ctx.stroke(); }
+  ctx.setLineDash([]);
+}
+function drawTile() {
+  const ctx = tile.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  for (const y of [-dy, -dy + H]) for (const x of [-dx, -dx + W]) ctx.drawImage(src, x, y);
+}
+function drawView() {
+  const ctx = view.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(tile, 0, 0);
+  if ($("asWhite").checked) {                 // exactly what the model will be shown
+    ctx.drawImage(mask, 0, 0);
+  } else {                                    // tinted, so painted white is never mistaken for white content
+    tint.getContext("2d").clearRect(0, 0, W, H);
+    tint.getContext("2d").drawImage(mask, 0, 0);
+    tint.getContext("2d").globalCompositeOperation = "source-in";
+    tint.getContext("2d").fillStyle = cssVar("--accent");
+    tint.getContext("2d").fillRect(0, 0, W, H);
+    tint.getContext("2d").globalCompositeOperation = "source-over";
+    ctx.globalAlpha = .65;
+    ctx.drawImage(tint, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+  // where the tile's own edges are now: the joins that have to be drawn across
+  const sx = (W - dx) % W, sy = (H - dy) % H;
+  ctx.strokeStyle = cssVar("--accent");
+  ctx.lineWidth = Math.max(1, W / 400); ctx.setLineDash([8, 6]);
+  ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, H); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke();
+  ctx.setLineDash([]);
+}
+function maskedFraction() {
+  // Exact, not a downsampled estimate: it goes into the record as masked_fraction. Only refresh()
+  // calls it, well after the last brush stroke, so reading a megapixel back costs nothing anyone sees.
+  const d = mask.getContext("2d").getImageData(0, 0, W, H).data;
+  let sum = 0;
+  for (let i = 3; i < d.length; i += 4) sum += d[i];
+  return sum / (255 * W * H);
+}
+
+// the reference: the tile with the mask burned in as real white
+function reference() {
+  const c = canvasOf(W, H), ctx = c.getContext("2d");
+  ctx.drawImage(tile, 0, 0);
+  ctx.drawImage(mask, 0, 0);
+  return c;
+}
+function maskPng() {                                   // white on black, for the record
+  const c = canvasOf(W, H), ctx = c.getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(mask, 0, 0);
+  return c.toDataURL("image/png");
+}
+
+// ─────────────────────────────── rolling ───────────────────────────────
+function setRoll(x, y, exact) {
+  // The offset is in pixels and does not have to sit on the token grid; snapping is only a comfort
+  // while dragging, and the half-way buttons ignore it so the seam lands exactly in the middle.
+  const step = $("snap").checked && !exact ? snap16 : Math.round;
+  dx = (step(x) % W + W) % W;
+  dy = (step(y) % H + H) % H;
+  $("dx").value = dx; $("dy").value = dy;
+  drawAll();
+}
+let dragging = null;
+const capture = (el, e) => { try { el.setPointerCapture(e.pointerId); } catch {} };  // no pointer: nothing to capture
+board.addEventListener("pointerdown", e => {
+  const p = at(board, e);
+  dragging = { ox: p.x - dx, oy: p.y - dy };
+  capture(board, e); board.classList.add("drag");
+});
+board.addEventListener("pointermove", e => { if (dragging) { const p = at(board, e); setRoll(p.x - dragging.ox, p.y - dragging.oy); } });
+for (const ev of ["pointerup", "pointercancel"]) board.addEventListener(ev, () => { dragging = null; board.classList.remove("drag"); });
+function at(canvas, e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * canvas.width, y: (e.clientY - r.top) / r.height * canvas.height };
+}
+$("dx").onchange = () => setRoll(+$("dx").value, dy);
+$("dy").onchange = () => setRoll(dx, +$("dy").value);
+$("halfX").onclick = () => setRoll(W / 2, dy, true);
+$("halfY").onclick = () => setRoll(dx, H / 2, true);
+$("halfBoth").onclick = () => setRoll(W / 2, H / 2, true);
+$("rollReset").onclick = () => setRoll(0, 0);
+
+// ─────────────────────────────── masking ───────────────────────────────
+let tool = "brush", rectFrom = null, painting = false;
+const setTool = t => {
+  tool = t;
+  for (const [id, name] of [["toolBrush", "brush"], ["toolRect", "rect"], ["toolErase", "erase"]])
+    $(id).classList.toggle("on", name === t);
+};
+$("toolBrush").onclick = () => setTool("brush");
+$("toolRect").onclick = () => setTool("rect");
+$("toolErase").onclick = () => setTool("erase");
+$("brush").oninput = () => $("brushN").textContent = $("brush").value;
+$("asWhite").onchange = drawView;
+
+function snapshot() { undos.push(mask.getContext("2d").getImageData(0, 0, W, H)); if (undos.length > 12) undos.shift(); }
+$("mUndo").onclick = () => { const s = undos.pop(); if (s) { mask.getContext("2d").putImageData(s, 0, 0); drawView(); refresh(); } };
+$("mClear").onclick = () => { snapshot(); mask.getContext("2d").clearRect(0, 0, W, H); drawView(); refresh(); };
+$("mInvert").onclick = () => {
+  snapshot();
+  const c = mask.getContext("2d"), was = c.getImageData(0, 0, W, H);
+  c.fillStyle = "#fff"; c.globalCompositeOperation = "source-over"; c.fillRect(0, 0, W, H);
+  const now = c.getImageData(0, 0, W, H);
+  for (let i = 3; i < now.data.length; i += 4) now.data[i] = 255 - was.data[i];
+  c.putImageData(now, 0, 0); drawView(); refresh();
+};
+
+// every shape is drawn nine times, at every wrap of the tile, so the mask lives on the torus too:
+// paint over an edge and the other edge is painted with it.
+function wrapped(draw, erase) {
+  const c = mask.getContext("2d");
+  c.save();
+  c.globalCompositeOperation = erase ? "destination-out" : "source-over";
+  c.fillStyle = c.strokeStyle = "#fff";
+  c.lineCap = c.lineJoin = "round";
+  for (const oy of [-H, 0, H]) for (const ox of [-W, 0, W]) {
+    c.save(); c.translate(ox, oy); draw(c); c.restore();
+  }
+  c.restore();
+  drawView(); refresh();
+}
+const stroke = (from, to, width, erase) => wrapped(c => {
+  c.lineWidth = width;
+  c.beginPath(); c.moveTo(from.x, from.y); c.lineTo(to.x, to.y); c.stroke();
+  c.beginPath(); c.arc(to.x, to.y, width / 2, 0, 7); c.fill();   // a click is a zero-length line, which strokes nothing
+}, erase);
+const fillRect = (x, y, w, h, erase) => wrapped(c => c.fillRect(x, y, w, h), erase);
+
+let last = null;
+view.addEventListener("pointerdown", e => {
+  const p = at(view, e);
+  snapshot();
+  painting = true; capture(view, e);
+  if (tool === "rect") { rectFrom = p; return; }
+  last = p;
+  stroke(p, p, +$("brush").value, tool === "erase" || e.buttons === 2);
+});
+view.addEventListener("pointermove", e => {
+  if (!painting || tool === "rect") return;
+  const p = at(view, e);
+  stroke(last, p, +$("brush").value, tool === "erase" || e.buttons === 2);
+  last = p;
+});
+for (const ev of ["pointerup", "pointercancel"]) view.addEventListener(ev, e => {
+  if (painting && tool === "rect" && rectFrom) {
+    const p = at(view, e);
+    fillRect(Math.min(rectFrom.x, p.x), Math.min(rectFrom.y, p.y), Math.abs(p.x - rectFrom.x), Math.abs(p.y - rectFrom.y), false);
+  }
+  painting = false; rectFrom = null;
+});
+view.addEventListener("contextmenu", e => e.preventDefault());
+
+// presets: centred on where the tile's own edges ended up, so they land on the seam at any offset
+const band = (axis, center, t) => {
+  snapshot();
+  if (axis === "v") fillRect(center - t / 2, 0, t, H, false);
+  else fillRect(0, center - t / 2, W, t, false);
+};
+$("pV").onclick = () => band("v", (W - dx) % W, +$("thick").value);
+$("pH").onclick = () => band("h", (H - dy) % H, +$("thick").value);
+$("pCross").onclick = () => { band("v", (W - dx) % W, +$("thick").value); band("h", (H - dy) % H, +$("thick").value); };
+$("pSquare").onclick = () => { const t = +$("thick").value; snapshot(); fillRect(W / 2 - t / 2, H / 2 - t / 2, t, t, false); };
+
+// ─────────────────────── the picture in, the reference out ───────────────────────
+dropzone($("srcDrop"), async files => {
+  if (!files.length) return;
+  await useSource(await loadImage(files[0]), true);
+});
+async function useSource(img, fitToSource) {
+  srcImg = img;
+  $("srcDrop").hidden = true; $("studio").hidden = false;
+  if (fitToSource) {
+    const cap = 1024;                                   // a sensible working size; raise it by hand
+    const k = Math.min(1, cap / Math.max(img.naturalWidth, img.naturalHeight));
+    setSize(floor16(img.naturalWidth * k), floor16(img.naturalHeight * k));
+  } else { drawSrc(); }
+  mask.getContext("2d").clearRect(0, 0, W, H);
+  setRoll(0, 0);
+}
+$("srcRemove").onclick = () => { srcImg = null; $("studio").hidden = true; $("srcDrop").hidden = false; };
+$("fitSrc").onclick = () => srcImg && setSize(floor16(srcImg.naturalWidth), floor16(srcImg.naturalHeight));
+for (const b of document.querySelectorAll("[data-size]")) b.onclick = () => setSize(+b.dataset.size, +b.dataset.size);
+$("tw").onchange = () => setSize(+$("tw").value, H);
+$("th").onchange = () => setSize(W, +$("th").value);
+$("sizeLock").onchange = () => {
+  $("ow").disabled = $("oh").disabled = $("sizeLock").checked;
+  if ($("sizeLock").checked) { $("ow").value = W; $("oh").value = H; }
+};
+$("dlRef").onclick = () => download(reference().toDataURL("image/png"), `reference_${W}x${H}_dx${dx}_dy${dy}.png`);
+
+// the reference the generator will use: the studio's, unless a file was dropped on stage 2
+let refFromFile = null;
+function syncRef() {
+  const thumb = canvasOf(160, Math.max(1, Math.round(160 * H / W)));
+  if (!refFromFile && srcImg) thumb.getContext("2d").drawImage(reference(), 0, 0, thumb.width, thumb.height);
+  const url = refFromFile || (srcImg ? thumb.toDataURL("image/png") : null);
+  $("refMain").hidden = !url;
+  if (url) $("refThumb").src = url;
+  $("refInfo").textContent = !url
+    ? "No reference yet: this would be plain text-to-image."
+    : refFromFile
+      ? "A dropped file. The studio above is not being used; roll offsets are taken as 0."
+      : `From the studio: ${W}×${H}, rolled by (${dx}, ${dy}), ${(100 * painted).toFixed(1)}% white.`;
+  if ($("sizeLock").checked && refFromFile === null && srcImg) { $("ow").value = W; $("oh").value = H; }
+}
+dropzone($("refDrop"), async files => {
+  if (!files.length) return;
+  const img = await loadImage(files[0]);
+  const c = canvasOf(img.naturalWidth, img.naturalHeight);
+  c.getContext("2d").drawImage(img, 0, 0);
+  refFromFile = c.toDataURL("image/png");
+  if ($("sizeLock").checked) { $("ow").value = round16(img.naturalWidth); $("oh").value = round16(img.naturalHeight); }
+  syncRef();
+});
+$("refClear").onclick = e => { e.stopPropagation(); refFromFile = null; syncRef(); };
+
+const extras = [];
+dropzone($("extraDrop"), async files => {
+  for (const f of files) {
+    const img = await loadImage(f);
+    const k = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = canvasOf(Math.round(img.naturalWidth * k), Math.round(img.naturalHeight * k));
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    extras.push(c.toDataURL("image/png"));
+  }
+  renderExtras();
+});
+function renderExtras() {
+  $("extraThumbs").innerHTML = "";
+  extras.forEach((url, i) => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    d.innerHTML = `<img src="${url}" alt=""><button title="remove">×</button>`;
+    d.querySelector("button").onclick = () => { extras.splice(i, 1); renderExtras(); };
+    $("extraThumbs").append(d);
+  });
+}
+
+// ─────────────────────────────── generating ───────────────────────────────
+$("promptReset").onclick = () => $("prompt").value = INFO.fill_prompt;
+$("promptClear").onclick = () => $("prompt").value = "";
+$("geoReset").onclick = () => $("geo_prompt").value = INFO.geo_prompt;
+$("wrap").onchange = () => $("geo_guidance").value = $("wrap").checked ? 2 : 0;
+
+const status = (text, err) => { $("status").textContent = text; $("status").className = err ? "err" : ""; };
+let shown = null, current = "tile";
+const history = [];
+
+for (const b of document.querySelectorAll("[data-view]")) b.onclick = () => showView(b.dataset.view);
+function showView(name) {
+  current = name;
+  for (const b of document.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === name);
+  if (shown) $("out").src = shown.out[name] || shown.out.tile;
+}
+function show(entry) {
+  shown = entry;
+  document.querySelector('[data-view="unrolled"]').disabled = !entry.out.unrolled;
+  for (const img of $("history").children) img.classList.toggle("on", img.dataset.run === entry.out.run);
+  $("saved").textContent = `Seed ${entry.body.settings.seed} · ${entry.out.seconds} s · ${entry.out.saved}`;
+  showView(shown.out[current] ? current : "tile");
+}
+
+$("go").onclick = async () => {
+  if ($("randomSeed").checked) $("seed").value = Math.floor(Math.random() * 2 ** 31);
+  const num = id => +$(id).value, side = num("refSide");
+  const usingStudio = !refFromFile && srcImg;
+  const body = {
+    prompt: $("prompt").value.trim(),
+    system_prompt: $("system").value.trim(),
+    geo_prompt: $("geo_prompt").value.trim(),
+    reference: refFromFile || (srcImg ? reference().toDataURL("image/png") : null),
+    refs: extras,
+    source: usingStudio ? src.toDataURL("image/png") : null,          // kept for the record only
+    mask: usingStudio ? maskPng() : null,
+    masked_fraction: usingStudio ? +maskedFraction().toFixed(4) : null,
+    roll: { dx: usingStudio ? dx : 0, dy: usingStudio ? dy : 0 },
+    settings: {
+      width: num("ow") || W, height: num("oh") || H, seed: num("seed"), num_steps: num("num_steps"),
+      guidance: num("guidance"), geo_guidance: num("geo_guidance"), wrap: $("wrap").checked,
+      unanchor_text: $("unanchor_text").checked, ref_max_pixels: side * side,
+    },
+  };
+  if (!body.prompt) return status("Write a prompt first.", true);
+  if (body.settings.width % CELL || body.settings.height % CELL) return status("The output size has to be a multiple of 16.", true);
+
+  $("go").disabled = true; status("Starting…");
+  const poll = setInterval(async () => {
+    const p = await (await fetch("/progress")).json();
+    if (p.total) { $("bar").firstElementChild.style.width = 100 * p.step / p.total + "%"; status(`Drawing… ${Math.round(100 * p.step / p.total)}%`); }
+  }, 500);
+  try {
+    const res = await fetch("/generate", { method: "POST", body: JSON.stringify(body) });
+    const out = await res.json();
+    if (res.status === 409) return status("Busy with another picture. Try again in a moment.", true);
+    if (!res.ok) throw new Error(out.error);
+    const entry = { out, body };
+    history.unshift(entry);
+    const img = document.createElement("img");
+    img.src = out.tile; img.dataset.run = out.run;
+    img.title = `${out.run} · seed ${body.settings.seed} · ${body.prompt.slice(0, 80)}`;
+    img.onclick = () => show(entry);
+    $("history").prepend(img);
+    show(entry);
+    status(`Done in ${out.seconds} s.`);
+  } catch (e) {
+    console.error(e);
+    status(String(e.message || e), true);
+  } finally {
+    clearInterval(poll); $("bar").firstElementChild.style.width = "0"; $("go").disabled = false;
+  }
+};
+
+$("dlOut").onclick = () => shown && download($("out").src, `${shown.out.run}_${current}.png`);
+$("toStudio").onclick = async () => {
+  if (!shown) return;
+  // one tile, whatever is on screen: sending the 2x2 back would double the size every round
+  await useSource(await loadImage(current === "unrolled" && shown.out.unrolled ? shown.out.unrolled : shown.out.tile), true);
+  status("The result is now the picture in the studio. Roll it, mask it again, and go round once more.");
+};
+async function saveZip(payload, label) {
+  status("Zipping…");
+  const res = await fetch("/save", { method: "POST", body: JSON.stringify(payload) });
+  if (!res.ok) return status((await res.json()).error, true);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  download(url, res.headers.get("Content-Disposition")?.match(/"(.+)"/)?.[1] || "runs.zip");
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  status(`${label} saved (${(blob.size / 1e6).toFixed(1)} MB).`);
+}
+$("saveRun").onclick = () => shown ? saveZip({ run: shown.out.run }, "Run") : status("Generate something first.", true);
+$("saveAll").onclick = () => saveZip({ all: true }, "Session");
+
+setSize(512, 512);
+</script>
+</body>
+</html>

@@ -29,7 +29,14 @@ from .sampling import (
     get_schedule,
     prc_img,
 )
-from .torus import DECODE_PAD_TOKENS, TORUS_PROMPT, build_torus_geometry, decode_torus, denoise_torus
+from .torus import (
+    DECODE_PAD_TOKENS,
+    TORUS_PROMPT,
+    build_torus_geometry,
+    decode_torus,
+    denoise_torus,
+    guidance_weights,
+)
 from .util import FLUX2_MODEL_INFO, load_ae, load_flow_model, load_text_encoder
 
 # Where `generate` starts the sampler when it is given an init image and no explicit t_start.
@@ -42,17 +49,23 @@ class TorusPipe:
 
     def __init__(self, model_name: str = "flux.2-klein-base-9b"):
         # assert not FLUX2_MODEL_INFO[model_name]["guidance_distilled"], "real CFG needs an undistilled model"
+        self.model_name = model_name
+        self.defaults = FLUX2_MODEL_INFO[model_name.lower()]["defaults"]  # what the model was distilled for
+        self.distilled = FLUX2_MODEL_INFO[model_name.lower()]["guidance_distilled"]
         self.text_encoder = load_text_encoder(model_name, device=torch.device("cuda")).eval()
         self.model = load_flow_model(model_name, device=torch.device("cuda")).eval()
         self.ae = load_ae(model_name).eval()
-        self.ctx_of: dict[str, Tensor] = {}  # text -> [512, D] bf16 on the CPU
+        self.ctx_of: dict[tuple[str | None, str], Tensor] = {}  # (system prompt, text) -> [512, D] bf16, CPU
 
     @torch.no_grad()
-    def encode_text(self, texts: list[str]):
-        todo = sorted(set(texts) - set(self.ctx_of))
+    def encode_text(self, texts: list[str], system: str | None = None):
+        """`system` is the text encoder's system turn (see text_encoder.py). It is part of the key:
+        the same prompt under two system messages is two different conditionings."""
+        todo = sorted({t for t in texts if (system, t) not in self.ctx_of})
         for i in range(0, len(todo), 8):
-            for t, c in zip(todo[i : i + 8], self.text_encoder(todo[i : i + 8]).to(torch.bfloat16).cpu()):
-                self.ctx_of[t] = c
+            batch = todo[i : i + 8]
+            for t, c in zip(batch, self.text_encoder(batch, system_message=system).to(torch.bfloat16).cpu()):
+                self.ctx_of[(system, t)] = c
 
     def drop_text_encoder(self):
         """On cards without FP8 (A40) the 8B encoder is 16 GB of bf16 next to the 18 GB flow model.
@@ -139,6 +152,7 @@ def generate(
     guidance: float = 4.0,
     geo_guidance: float = 6.0,  # untuned (the reference uses 6 for ERP on FLUX.2-dev); == guidance is plain CFG
     geo_prompt: str = TORUS_PROMPT,
+    system_prompt: str | None = None,  # the text encoder's system turn; None/"" = the model's default
     wrap: tuple[bool, bool] = (True, True),  # (h, w)
     unanchor_text: bool = False,
     ref_image: str
@@ -167,15 +181,17 @@ def generate(
     """
     prompts = [prompt] if isinstance(prompt, str) else list(prompt)
     seeds = [seed] * len(prompts) if isinstance(seed, int) else list(seed)
+    system_prompt = system_prompt or None  # "" and None are the same conditioning, so one cache key
     gh, gw = height // 16, width // 16
     ae_dtype = next(pipe.ae.parameters()).dtype
 
-    texts = [""] * len(prompts) + prompts
-    if geo_guidance != 0:
-        texts += [f"{p}. {geo_prompt}" for p in prompts]
+    # Only the guidance branches that carry a nonzero weight are encoded, batched and run: at the
+    # distilled models' guidance = 1 the unconditional branch is dead weight. See guidance_weights.
+    blocks = [[""] * len(prompts), prompts, [f"{p}. {geo_prompt}" for p in prompts]]
+    texts = [t for w, block in zip(guidance_weights(guidance, geo_guidance), blocks) if w != 0 for t in block]
     if pipe.text_encoder is not None:
-        pipe.encode_text(texts)
-    ctx, ctx_ids = batched_prc_txt(torch.stack([pipe.ctx_of[t] for t in texts]).cuda())
+        pipe.encode_text(texts, system_prompt)
+    ctx, ctx_ids = batched_prc_txt(torch.stack([pipe.ctx_of[(system_prompt, t)] for t in texts]).cuda())
 
     randn = torch.cat(
         [
