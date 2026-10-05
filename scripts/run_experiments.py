@@ -8,6 +8,7 @@
     uv run python scripts/run_experiments.py --band 64                    width of the white cross (and frame = band / 2)
     uv run python scripts/run_experiments.py --band 128 --border 32       ... or set the frame of 2 and 3 on its own
     uv run python scripts/run_experiments.py --prompt "Fill the white."   or --prompt prompt.txt
+    uv run python scripts/run_experiments.py --system_prompt none         no system turn: the bare prompt (leaves holes unfilled)
     uv run python scripts/run_experiments.py --guidance 2.5               real CFG, two passes per step instead of one
     uv run python scripts/run_experiments.py --wrap False                 stock attention: the baseline without seamless RoPE
     uv run python scripts/run_experiments.py --gpus 0,1,2,3 --run_name first
@@ -40,7 +41,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from seamless.experiments import EXPERIMENTS, FILL_PROMPT
+from seamless.experiments import EXPERIMENTS, FILL_PROMPT, SYSTEM_PROMPT
 from seamless.report import write_report
 
 REPO = Path(__file__).resolve().parents[1]
@@ -129,6 +130,7 @@ def main(
     border: int
     | None = None,  # experiments 2 and 3: width of the frame cut off and painted white. Default band / 2
     prompt: str = FILL_PROMPT,  # the instruction, or a .txt file that holds it
+    system_prompt: str = SYSTEM_PROMPT,  # the system turn in front of it (text or .txt). "none": no system turn
     guidance: float = 1.0,  # 1: the distilled recipe, one pass per step. Else real CFG against the empty prompt
     num_steps: int = 4,
     seed: int = 0,
@@ -145,6 +147,12 @@ def main(
     names = find_experiments(experiments)
     border = band // 2 if border is None else border
     prompt = Path(prompt).read_text().strip() if str(prompt).endswith(".txt") else str(prompt)
+    system_prompt = (
+        "" if system_prompt is None or str(system_prompt).lower() == "none" else str(system_prompt)
+    )
+    system_prompt = (
+        Path(system_prompt).read_text().strip() if system_prompt.endswith(".txt") else system_prompt
+    )
     assert "klein" in model_name, "the sampler here is the klein recipe (no guidance embedding)"
 
     for path in tile_paths:
@@ -169,6 +177,7 @@ def main(
         "experiments": names,
         "band": band,
         "border": border,
+        "system_prompt": system_prompt,
         "prompt": prompt,
         "guidance": float(guidance),
         "num_steps": int(num_steps),

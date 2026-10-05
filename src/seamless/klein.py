@@ -1,12 +1,13 @@
 """FLUX.2 klein image-to-image on the torus: a picture with a white hole in, a tile out.
 
-    klein = Klein.load("flux.2-klein-9b", prompts=[FILL_PROMPT])
+    klein = Klein.load("flux.2-klein-9b", prompts=[FILL_PROMPT], system_prompt=SYSTEM_PROMPT)
     tile = klein(masked_picture, FILL_PROMPT, seed=0)          # PIL in, PIL out, same size
 
 The recipe is the model's own -- for the distilled klein models 4 steps at guidance 1, which is one
 forward pass per step -- and the picture goes in the way FLUX.2 takes any reference image: encoded,
 and its tokens appended to the sequence. No mask channel, no init latent, no inpainting head, no
-second prompt, no extra guidance branch. The one thing that is not stock is the attention: the
+second prompt, no extra guidance branch. `system_prompt` is the text encoder's system turn, put in
+front of every prompt it encodes. The one thing that is not stock is the attention: the
 output's tokens sit on a torus (flux2/torus.py), so the model draws the left edge next to the right
 edge and the top next to the bottom, and the decoder is handed the latent continued past its edges.
 `wrap=False` turns exactly that off and leaves stock FLUX.2, the baseline to compare against.
@@ -48,15 +49,27 @@ class Klein:
         self.wrap, self.unanchor_text, self.q_chunk = (wrap, wrap), unanchor_text, q_chunk
 
     @classmethod
-    def load(cls, model_name: str, prompts: list[str], guidance: float = 1.0, **settings) -> "Klein":
+    def load(
+        cls,
+        model_name: str,
+        prompts: list[str],
+        system_prompt: str | None = None,
+        guidance: float = 1.0,
+        **settings,
+    ) -> "Klein":
         """The text encoder goes first and leaves before the flow model arrives: on an A40 the two
-        together are 34 of 48 GB, and a run only ever needs a handful of prompts encoded once."""
+        together are 34 of 48 GB, and a run only ever needs a handful of prompts encoded once.
+        `system_prompt` goes in front of all of them, the empty prompt of CFG included; None or ""
+        is the bare user turn the klein models were trained on."""
         from flux2.util import load_ae, load_flow_model, load_text_encoder
 
         encoder = load_text_encoder(model_name, device=torch.device("cuda")).eval()
         texts = sorted(set(prompts) | ({""} if guidance != 1 else set()))
         with torch.no_grad():
-            ctx = {text: encoder([text]).to(torch.bfloat16) for text in texts}
+            ctx = {
+                text: encoder([text], system_message=system_prompt or None).to(torch.bfloat16)
+                for text in texts
+            }
         del encoder
         gc.collect()
         torch.cuda.empty_cache()
@@ -64,7 +77,9 @@ class Klein:
         return cls(model, load_ae(model_name).eval(), ctx, guidance=guidance, **settings)
 
     @classmethod
-    def toy(cls, prompts: list[str], guidance: float = 1.0, **settings) -> "Klein":
+    def toy(
+        cls, prompts: list[str], system_prompt: str | None = None, guidance: float = 1.0, **settings
+    ) -> "Klein":
         """Random weights, CPU, seconds. The output is noise; what it proves is the plumbing."""
 
         @dataclass
@@ -83,8 +98,11 @@ class Klein:
         torch.manual_seed(0)
         texts = sorted(set(prompts) | ({""} if guidance != 1 else set()))
         ctx = {
-            text: torch.randn((1, 5, 12), generator=torch.Generator().manual_seed(zlib.crc32(text.encode())))
+            text: torch.randn((1, 5, 12), generator=torch.Generator().manual_seed(zlib.crc32(chat.encode())))
             for text in texts
+            for chat in [
+                f"{system_prompt or ''}\n{text}"
+            ]  # a stand-in for the encoder: the system turn counts
         }
         ae = AutoEncoder(AutoEncoderParams(ch=32)).eval()
         return cls(Flux2(ToyParams()).eval(), ae, ctx, guidance=guidance, **settings)

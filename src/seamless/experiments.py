@@ -2,7 +2,9 @@
 
 Every experiment ends in the same act: a 1024 x 1024 picture with a white hole is handed to FLUX.2
 klein as a reference image, with the instruction to fill the white, and the output is generated on
-the torus (flux2/torus.py: the seamless RoPE, no extra prompt, no extra guidance branch). They
+the torus (flux2/torus.py: the seamless RoPE, no extra prompt, no extra guidance branch). The
+instruction has two parts, a system turn that tells the model it is an inpainter and the user
+turn that says what to fill; see SYSTEM_PROMPT for why the first is not optional. They
 differ in where the picture comes from and in how it is framed when the model sees it.
 
   1_seam_fix        An almost seamless tile. Roll it by half so its seams cross in the middle, paint
@@ -33,6 +35,16 @@ from PIL import Image
 
 from .sheet import Panel, build_sheet
 from .tiles import center_crop, pad, paint, psnr, roll, seam_band, seam_jump, tiled, unroll
+
+# The text encoder's system turn, in front of the fill prompt. The klein models were conditioned on a
+# bare user turn, and with only that the instruction does not reliably take: some tiles come back
+# with the white cross untouched, or with one white band left across the middle. Telling the model
+# what kind of model it is fixes it (found with the "inpainter" preset of the dev branch's ref_web).
+SYSTEM_PROMPT = (
+    "You are an image completion model. Blank white regions of the input are holes to be filled. "
+    "You reconstruct what the surrounding image implies should be there, matching its style, "
+    "colour and scale, and you reproduce the rest of the image unchanged."
+)
 
 FILL_PROMPT = (
     "Fill in the blank white regions of this image. "
@@ -226,6 +238,7 @@ def header(exp: Experiment, record: dict, config: dict) -> list[str]:
         f"{exp.title}   |   {record['tile']}",
         exp.about,
         f"hole: {record['hole']} px across each seam   |   {settings}",
+        f"system: {config['system_prompt'] or '(none: bare user turn)'}",
         f"prompt: {config['prompt']}",
     ]
     if "metrics" in record:

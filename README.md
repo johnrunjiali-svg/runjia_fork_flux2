@@ -5,8 +5,9 @@ it to fill the white in? This branch is three experiments that ask that question
 on a fixed set of test patterns, with every intermediate picture kept.
 
 The model is used as released: the distilled recipe (4 steps, guidance 1, one forward pass per step),
-the masked picture given as an ordinary reference image, one prompt. No mask channel, no inpainting
-head, no second prompt, no extra guidance branch. The one change is the **seamless RoPE** of
+the masked picture given as an ordinary reference image, one prompt behind a system turn that tells
+the model it is an inpainter. No mask channel, no inpainting head, no second prompt, no extra
+guidance branch. The one change is the **seamless RoPE** of
 [`src/flux2/torus.py`](src/flux2/torus.py): the output's tokens sit on a torus, so the model draws
 the left edge next to the right edge and the top next to the bottom. `--wrap False` turns that off
 and gives stock FLUX.2 as the baseline.
@@ -61,6 +62,7 @@ uv run python scripts/run_experiments.py --band 64 --run_name band64
 | `--band` | `128` | width of the white cross in experiment 1 |
 | `--border` | `band / 2` | width of the frame cut off and painted white in experiments 2 and 3 |
 | `--prompt` | the fill prompt in [`experiments.py`](src/seamless/experiments.py) | the instruction, or a `.txt` file holding it |
+| `--system_prompt` | the inpainter prompt, same file | the text encoder's system turn, in front of the prompt. `none` is the bare prompt |
 | `--guidance` | `1.0` | 1 is the distilled recipe. Any other value is real CFG against the empty prompt: two passes per step |
 | `--num_steps` | `4` | |
 | `--seed` | `0` | |
@@ -72,6 +74,10 @@ uv run python scripts/run_experiments.py --band 64 --run_name band64
 
 Bands and borders that are multiples of 32 and 16 px keep the hole's edges on the model's 16 px
 token grid.
+
+The system turn is not decoration. With the fill prompt alone the instruction does not reliably
+take: some tiles come back with the white cross untouched, or with one white band left across the
+middle. `--system_prompt none` reproduces that.
 
 **Without a GPU.** Two ways to check a run before spending GPU time on it:
 

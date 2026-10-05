@@ -192,8 +192,13 @@ def main():
     assert out.tobytes() == klein(picture, "fill", seed=0).tobytes(), "same seed, different picture"
     assert out.tobytes() != klein(picture, "fill", seed=1).tobytes(), "the seed changed nothing"
     assert out.tobytes() != Klein.toy(["fill"], num_steps=2, wrap=False)(picture, "fill").tobytes()
+    assert (
+        out.tobytes() != Klein.toy(["fill"], "You are an inpainter.", num_steps=2)(picture, "fill").tobytes()
+    )
     assert Klein.toy(["fill"], guidance=2.0, num_steps=2)(picture, "fill").size == picture.size
-    print("ok   Klein: picture in, picture out; deterministic; seed, wrap and guidance all reach the sampler")
+    print(
+        "ok   Klein: picture in, picture out; deterministic; seed, wrap, system prompt, guidance reach the sampler"
+    )
     print("all passed")
 
 

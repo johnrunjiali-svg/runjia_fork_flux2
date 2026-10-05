@@ -77,6 +77,7 @@ def write_report(run_dir: str) -> Path:
     out.append(
         f"<p>cross <code>--band {config['band']}</code> px &middot; frame <code>--border {config['border']}</code> px"
         f" &middot; {len(config['tiles'])} tiles &middot; commit {html.escape(str(config['commit']))}</p>"
+        f"<p>system: {html.escape(config.get('system_prompt') or '(none: bare user turn)')}</p>"
         f"<p>prompt: {html.escape(config['prompt'])}</p>"
     )
 
