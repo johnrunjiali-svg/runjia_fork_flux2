@@ -1,4 +1,4 @@
-"""Seconds on a CPU, random toy weights, no checkpoint:  PYTHONPATH=src python scripts/torus_selftest.py
+"""Seconds on a CPU, random toy weights, no checkpoint:  uv run python scripts/torus_selftest.py
 
 1. torus_attention == attention written pair by pair from the nearest-copy displacement.
 2. wrap off: torus_forward == the stock Flux2.forward.
@@ -6,11 +6,10 @@
    tell where the image was cut. With the text anchored (the default) the same test must fail.
 4. decode_torus returns the right size.
 5. With reference tokens ([txt, img, ref], ref grid larger than the image grid): 1 and 2 again.
-6. denoise_torus with `keep`: kept tokens come out exactly clean, free tokens do not -- from pure
-   noise, and from a partially noised start (t_start) with the noise handed in separately.
-7. schedule_from: starts at exactly t_start, ends at 0, strictly decreasing, t_start=1 is stock.
-8. guidance_weights: a branch whose weight is zero can be left out of the batch and the sampler
-   follows the same trajectory -- what makes guidance = 1 cost half a step, or a third of one.
+6. denoise_torus: wrap off and guidance 1 is the stock sampler, `sampling.denoise`; guidance != 1
+   is classifier-free guidance, which with the empty prompt set equal to the prompt is guidance 1.
+7. seamless.klein.Klein end to end on toy weights: a picture in, a picture of the same size out,
+   the same for the same seed, different with the wrap off or another seed.
 """
 
 import itertools
@@ -18,12 +17,13 @@ from dataclasses import dataclass, field
 
 import torch
 from einops import rearrange
+from PIL import Image
 
 from flux2.autoencoder import AutoEncoder, AutoEncoderParams
 from flux2.model import Flux2, rope
-from flux2.sampling import get_schedule
+from flux2.sampling import denoise
 from flux2.torus import build_torus_geometry, decode_torus, denoise_torus, torus_attention, torus_forward
-from flux2.torus_generate import schedule_from
+from seamless.klein import Klein
 
 
 @dataclass
@@ -153,71 +153,29 @@ def main():
     print("ok   reference tokens: pairwise attention, and wrap off equals stock forward with refs")
 
     # 6
+    noise, txt = torch.randn(2, gh * gw, 8), torch.randn(2, num_txt, 12)
+    ref, steps = x_ref[:1, gh * gw :], [1.0, 0.6, 0.3, 0.0]
+    flat = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), (False, False), False, ref_ids)
+    stock = denoise(
+        model,
+        noise,
+        x_ids.expand(2, -1, -1),
+        txt,
+        ctx_ids.expand(2, -1, -1),
+        steps,
+        1.0,
+        img_cond_seq=ref.expand(2, -1, -1),
+        img_cond_seq_ids=ref_ids.expand(2, -1, -1),
+    )
+    err = (denoise_torus(model, noise, txt, flat, steps, ref=ref) - stock).abs().max().item()
+    assert err < 1e-4, ("stock sampler", err)
     geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), (True, True), False, ref_ids)
-    noise, clean = torch.randn(2, gh * gw, 8), torch.randn(1, gh * gw, 8)
-    keep = torch.rand(1, gh * gw, 1) < 0.5
-    txt = torch.randn(6, num_txt, 12)
-    for t_start in (1.0, 0.6):
-        # What generate hands in: pure noise at t_start = 1, the mixture below it.
-        img = noise if t_start == 1.0 else (1 - t_start) * clean + t_start * noise
-        steps = [t_start * t for t in (1.0, 0.6, 0.3, 0.0)]
-        out = denoise_torus(
-            model,
-            img,
-            txt,
-            geo,
-            steps,
-            4.0,
-            2.0,
-            ref=x_ref[:1, gh * gw :],
-            keep=keep,
-            clean=clean,
-            noise=noise,
-        )
-        kept = keep.expand_as(out)
-        assert torch.equal(out[kept], clean.expand_as(out)[kept]), t_start
-        assert (out - clean)[~kept].abs().min() > 1e-4, t_start
-    print("ok   keep: kept tokens are exactly clean, from t=1 and from a partially noised start")
-
-    # 7
-    for num_steps, seq_len in ((4, 48), (50, 1024)):
-        assert schedule_from(num_steps, seq_len, 1.0) == get_schedule(num_steps, seq_len)
-        for t_start in (0.4, 0.55, 0.7, 0.999):
-            s = schedule_from(num_steps, seq_len, t_start)
-            assert len(s) == num_steps + 1 and abs(s[0] - t_start) < 1e-6 and s[-1] == 0.0, (t_start, s)
-            assert all(a > b for a, b in zip(s, s[1:])), (t_start, s)
-    print("ok   schedule_from: starts at t_start, ends at 0, strictly decreasing")
-
-    # 8
-    steps = [1.0, 0.6, 0.3, 0.0]
-    cond, geo_txt = txt[2:4], txt[4:6]
-    for guidance, geo_guidance, blocks in ((4.0, 2.0, 2), (4.0, 0.0, 1)):
-        # With the unconditional block equal to the conditional one, v_uncond == v_cond and the
-        # three-branch sum collapses to what guidance = 1 computes from `blocks` fewer blocks.
-        # Same velocity, same trajectory: the branch `guidance_weights` drops is genuinely dead.
-        full = denoise_torus(
-            model,
-            noise,
-            torch.cat((cond, cond, geo_txt))[: 2 * (blocks + 1)],
-            geo,
-            steps,
-            guidance,
-            geo_guidance,
-            ref=x_ref[:1, gh * gw :],
-        )
-        few = denoise_torus(
-            model,
-            noise,
-            torch.cat((cond, geo_txt))[: 2 * blocks],
-            geo,
-            steps,
-            1.0,
-            geo_guidance,
-            ref=x_ref[:1, gh * gw :],
-        )
-        err = (full - few).abs().max().item()
-        assert err < 1e-4, (guidance, geo_guidance, err)
-    print("ok   guidance_weights: dropping a zero-weight branch leaves the trajectory unchanged")
+    one = denoise_torus(model, noise, txt, geo, steps, ref=ref)
+    two = denoise_torus(model, noise, torch.cat((txt, txt)), geo, steps, guidance=3.0, ref=ref)
+    err = (one - two).abs().max().item()
+    assert err < 1e-4, ("cfg", err)
+    assert (one - stock).abs().max() > 1e-4, "the wrap changed nothing"
+    print("ok   denoise_torus: wrap off is the stock sampler, CFG with equal branches is guidance 1")
 
     # 4
     ae = AutoEncoder(AutoEncoderParams(ch=32)).eval()
@@ -225,6 +183,17 @@ def main():
     for wrap in [(True, True), (False, True), (False, False)]:
         assert decode_torus(ae, z, wrap, pad=2).shape == (1, 3, 64, 80), wrap
     print("ok   decode_torus shapes")
+
+    # 7
+    picture = Image.fromarray(torch.randint(0, 256, (160, 192, 3), dtype=torch.uint8).numpy())
+    klein = Klein.toy(["fill"], num_steps=2)
+    out = klein(picture, "fill", seed=0)
+    assert out.size == picture.size and out.mode == "RGB", out.size
+    assert out.tobytes() == klein(picture, "fill", seed=0).tobytes(), "same seed, different picture"
+    assert out.tobytes() != klein(picture, "fill", seed=1).tobytes(), "the seed changed nothing"
+    assert out.tobytes() != Klein.toy(["fill"], num_steps=2, wrap=False)(picture, "fill").tobytes()
+    assert Klein.toy(["fill"], guidance=2.0, num_steps=2)(picture, "fill").size == picture.size
+    print("ok   Klein: picture in, picture out; deterministic; seed, wrap and guidance all reach the sampler")
     print("all passed")
 
 

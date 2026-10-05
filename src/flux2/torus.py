@@ -8,8 +8,7 @@ RoPE makes the logit between a query at p and a key at q
     (R(p) x_p)^T (R(q) x_q) = x_p^T R(q - p) x_q,        R(d) = blockdiag(rot(omega_m * d))
 
 so all that position contributes is the displacement d = q - p. There are two ways to make that
-periodic. One is to move every omega_m onto a multiple of 2 pi / n, so that R(d + n) = R(d)
-(reference_code/position.py, and the high-frequency path of reference_code/erp_utils.py); that
+periodic. One is to move every omega_m onto a multiple of 2 pi / n, so that R(d + n) = R(d); that
 changes the frequencies the model was trained with. The other, this file, keeps every frequency and
 changes the displacement: on a circle of n tokens the displacement from p to q is not q - p but its
 nearest periodic copy (the "minimum image convention" of periodic-boundary simulations)
@@ -48,27 +47,15 @@ Two choices that are not forced, so they are flagged here rather than buried:
   network can tell where the image was cut: roll the input latent and the output rolls with it, to
   floating point (scripts/torus_selftest.py checks this).
 
-Two ways to bring an existing picture in, both optional and independent:
+An existing picture comes in as a reference image (FLUX.2's own image-to-image): its tokens are
+appended after the image tokens, [txt, img, ref], exactly as the stock `denoise` does. A reference
+is an ordinary flat picture, so every pair that involves a ref token keeps its stock displacement;
+only img-img pairs wrap. That is the whole interface of the experiments in src/seamless: a picture
+with a white hole is the reference, the prompt says to fill the white, and the output is generated
+on the torus -- so whatever the model draws at one edge it draws next to the opposite edge.
 
-- Reference image (FLUX.2's own image-to-image): its tokens are appended after the image tokens,
-  [txt, img, ref], exactly as the stock `denoise` does. A reference is an ordinary flat picture, so
-  every pair that involves a ref token keeps its stock displacement; only img-img pairs wrap.
-- Untouched region (`keep` in `denoise_torus`): not a condition of the network at all, a constraint
-  on the sampler. After every Euler step the kept tokens are overwritten by the clean latent noised
-  to the current time, so the free tokens are always denoised next to a correctly-noised version of
-  what must stay, across the torus seam as well. Keep the middle of any picture, leave a band at the
-  edges free, and the model has to invent the band that makes the picture tile.
-
-The second of those has a failure mode that is worth stating plainly, because the fix is a number
-the caller picks. At t = 1 the kept region *is* pure noise -- (1 - t) clean + t noise with t = 1
-carries nothing of `clean` -- so the first Euler step decides the free region while knowing nothing
-about the picture it has to join. That first velocity is a full-size commitment to a layout drawn
-from the prompt alone; later steps can only refine it, so the free region ends up composed for a
-picture that is not there. Starting the sampler part way down the trajectory instead, at
-timesteps[0] = t_start in roughly 0.4-0.7 with x_t = (1 - t_start) clean + t_start noise over the
-*whole* grid, means every step sees the picture. `torus_generate.generate` takes `t_start` and does
-this; the price is that the free region begins as a noised copy of what was there, so the lower
-t_start goes the less the model will move it.
+Nothing here adds a guidance branch. The sampler is the model's own recipe -- for the distilled
+klein models, 4 steps at guidance 1, one forward pass each -- with the attention swapped.
 """
 
 from dataclasses import dataclass
@@ -81,18 +68,7 @@ from tqdm import tqdm
 
 from .model import Flux2, apply_rope, timestep_embedding
 
-# Appended to the prompt for the third guidance branch, the analogue of ERP_PROMPT in
-# reference_code/erp_utils.py. Untuned.
-TORUS_PROMPT = (
-    "The whole image is one single seamless tile: its left edge continues into its right edge and "
-    "its top edge continues into its bottom edge, so copies of it placed side by side join with no "
-    "visible seam. The image is exactly one cell, not a grid or mosaic of smaller repeated tiles, "
-    "and no motif or cluster inside it is visibly repeated: irregular organic layout, varied scale, "
-    "elements cross the edges. No border, no frame, no vignette."
-)
-
-# One-sided receptive field of the AE decoder is ~18 latent pixels (same number as
-# decoder_circular_pad_width in reference_code/erp_utils.py), and a token is 2x2 latent pixels.
+# One-sided receptive field of the AE decoder is ~18 latent pixels, and a token is 2x2 latent pixels.
 DECODE_PAD_TOKENS = 9
 
 
@@ -231,72 +207,35 @@ def torus_forward(
     return model.final_layer(img, vec)
 
 
-def guidance_weights(guidance: float, geo_guidance: float) -> list[float]:
-    """The weights of [v_uncond, v_cond, v_geo] in the three-way guidance of `denoise_torus`:
-
-        v = v_uncond + guidance (v_cond - v_uncond) + geo_guidance (v_geo - v_cond)
-          = (1 - guidance) v_uncond + (guidance - geo_guidance) v_cond + geo_guidance v_geo
-
-    A branch whose weight is zero contributes nothing, so it is not computed at all: `generate`
-    leaves its prompt out of the batch and `denoise_torus` is handed that many fewer blocks. The
-    three cases that matters for are guidance = 1 (the distilled klein models' fixed value: the
-    unconditional branch drops out, halving a step, or cutting it to a third when geo_guidance is
-    also on), geo_guidance = 0 (no torus sentence), and geo_guidance = guidance (plain CFG on the
-    long prompt, where the middle branch drops out -- the cancellation this file's docstring notes).
-    """
-    return [1.0 - guidance, guidance - geo_guidance, geo_guidance]
-
-
 def denoise_torus(
     model: Flux2,
     img: Tensor,  # [P, N_img, C] noise, one latent per prompt
-    txt: Tensor,  # [BP, N_txt, D]: the branches of `guidance_weights` that carry a nonzero weight,
-    #               in order: P empty prompts, P prompts, P prompts + TORUS_PROMPT
+    txt: Tensor,  # [P, N_txt, D] the prompts; at guidance != 1, [2P, N_txt, D]: P empty prompts, then the prompts
     geo: TorusGeometry,
     timesteps: list[float],
-    guidance: float,
-    geo_guidance: float,
+    guidance: float = 1.0,
     q_chunk: int = 512,
     ref: Tensor | None = None,  # [1, N_ref, C] clean reference tokens, seen by every branch
-    keep: Tensor | None = None,  # [1, N_img, 1] bool: tokens that must come out equal to `clean`
-    clean: Tensor | None = None,  # [1, N_img, C] the encoded picture that `keep` refers to
-    noise: Tensor | None = None,  # the pure noise `img` was built from; defaults to `img` itself
-    on_step=None,  # called as on_step(steps_done, steps_total); the web page's progress bar
+    on_step=None,  # called as on_step(steps_done, steps_total)
 ) -> Tensor:
-    """Euler flow matching with the three-way guidance of reference_code/pipeline_flux2_erp.py:
+    """Euler flow matching, `sampling.denoise` with the attention swapped.
 
-        v = v_uncond + guidance * (v_cond - v_uncond) + geo_guidance * (v_geo - v_cond)
-
-    The first difference is what the prompt adds over no prompt, the second what the torus sentence
-    adds over the prompt alone. With geo_guidance == guidance the v_cond terms cancel and this is
-    plain CFG on the long prompt, so the third branch only says something new away from that value.
-
-    How many blocks `txt` has says which branches the caller kept: `guidance_weights` turns the two
-    numbers into one weight per branch, and the branches with weight zero are not passed in and not
-    run. The blocks that are passed stay in the order (uncond, cond, geo).
-
-    `keep`: the flow is x_t = (1 - t) x_0 + t noise, so where x_0 is known, x_t is known at every t.
-    The noise used is the token's own starting noise, which keeps the kept region on one straight
-    trajectory (at t=1 it is pure noise, at t=0 it is exactly `clean`).
-
-    `noise` only has to be given when `img` is not pure noise: starting at timesteps[0] < 1 the
-    caller hands in x_t = (1 - t) clean + t noise, and the kept region has to be re-noised with the
-    same `noise` it started on, not with that mixture (see torus_generate.generate, `t_start`).
+    guidance = 1 is the distilled klein models' fixed value and costs one forward pass per step.
+    Any other value is real classifier-free guidance, v = v_uncond + guidance (v_cond - v_uncond),
+    and costs two: the recipe of the undistilled base models, off-recipe but usable on the others.
     """
-    noise, num_img = img if noise is None else noise, img.shape[1]
+    num_img, branches = img.shape[1], txt.shape[0] // img.shape[0]
+    assert branches == (1 if guidance == 1 else 2), f"{branches} text blocks for guidance {guidance}"
     for step, (t_curr, t_prev) in enumerate(tqdm(list(zip(timesteps[:-1], timesteps[1:])), desc="denoise")):
         t_vec = torch.full((txt.shape[0],), t_curr, dtype=img.dtype, device=img.device)
-        branches = txt.shape[0] // img.shape[0]
         x = img.repeat(branches, 1, 1)
         if ref is not None:
             x = torch.cat((x, ref.expand(x.shape[0], -1, -1)), dim=1)
-        pred = torus_forward(model, x, t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk)[:, :num_img]
-        weights = [w for w in guidance_weights(guidance, geo_guidance) if w != 0]
-        assert len(weights) == branches, f"{branches} text blocks for weights {weights}"
-        v = sum(w * p for w, p in zip(weights, pred.chunk(branches)))
+        v = torus_forward(model, x, t_vec, txt, guidance=None, geo=geo, q_chunk=q_chunk)[:, :num_img]
+        if branches == 2:
+            v_uncond, v_cond = v.chunk(2)
+            v = v_uncond + guidance * (v_cond - v_uncond)
         img = img + (t_prev - t_curr) * v
-        if keep is not None:
-            img = torch.where(keep, (1 - t_prev) * clean + t_prev * noise, img)
         if on_step is not None:
             on_step(step + 1, len(timesteps) - 1)
     return img

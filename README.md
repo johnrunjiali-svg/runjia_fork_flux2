@@ -1,163 +1,156 @@
-# FLUX.2
+# Seamless tiles by filling a white hole
 
-**Frontier Visual Intelligence** — State-of-the-art image generation and editing from [Black Forest Labs](https://bfl.ai).
+Can an image-to-image model make a tile seamless if we simply paint the part to redraw white and ask
+it to fill the white in? This branch is three experiments that ask that question of FLUX.2 [klein] 9B,
+on a fixed set of test patterns, with every intermediate picture kept.
 
----
+The model is used as released: the distilled recipe (4 steps, guidance 1, one forward pass per step),
+the masked picture given as an ordinary reference image, one prompt. No mask channel, no inpainting
+head, no second prompt, no extra guidance branch. The one change is the **seamless RoPE** of
+[`src/flux2/torus.py`](src/flux2/torus.py): the output's tokens sit on a torus, so the model draws
+the left edge next to the right edge and the top next to the bottom. `--wrap False` turns that off
+and gives stock FLUX.2 as the baseline.
 
-<p align="center">
-<a href="https://docs.bfl.ai">API Docs</a> •
-<a href="https://huggingface.co/black-forest-labs">Hugging Face</a> •
-<a href="https://bfl.ai/blog">Blog</a>
-</p>
+## The three experiments
 
-This repo contains minimal inference code to run image generation & editing with our FLUX.2 open-weight models.
+All three end the same way: a 1024 x 1024 picture with a white hole goes to the model. They differ in
+where the picture comes from and how it is framed.
 
-## News
+| | starts from | the model sees | question |
+| :-- | :-- | :-- | :-- |
+| `1_seam_fix` | an almost seamless tile | the tile rolled by half, a white cross of `--band` px over its seams | are small seam artifacts repaired? |
+| `2_outpaint_frame` | the centre crop of the tile, `--border` px cut off every side: it does not repeat | the crop on a white canvas, so the hole is a frame around it | does outpainting the frame give a tile that repeats? |
+| `3_outpaint_cross` | the same crop | the same canvas rolled by half, so the frame is a cross in the middle | does it help to move the hole to the middle? |
 
-- **[15.01.2026]** Today, we release the FLUX.2 [klein] family of models, our fastest models yet. Sub-second generation on consumer GPUs. Read more about it in our [blog post](https://bfl.ai/blog/flux2-klein-towards-interactive-visual-intelligence).
-- **[25.11.2025]** We are releasing FLUX.2 [dev], a 32B parameter model for text-to-image generation, and image editing (single reference image and multiple reference images).
+Rolling a tile means sliding a 1 x 1 window over a 2 x 2 board of copies: the same tile cut at a
+different place. Rolled by half, the tile's own edges become two lines that cross in the middle of
+the picture, where the model can draw across them.
 
-## Model Overview
+**Two of the three are one run.** A frame of 64 px around a tile and a cross of 128 px through the
+rolled tile are the same mask, so with `--band` = 2 x `--border` (the default) experiments 1 and 3
+hand the model a byte-identical picture. The script generates it once and reports it twice: against
+the original tile in experiment 1, against the crop in experiment 3. Experiment 2 is the other run,
+and its input is that same picture before the roll, so 2 against 3 changes exactly one thing: where
+the hole sits. Set `--border` on its own and 1 and 3 become separate runs.
 
-| Name | Step-distilled | Guidance-distilled | Text-to-Image | Image Editing (Single reference) | Image Editing (Multi-reference) | License |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| [FLUX.2 [klein] 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) | ✅ | ✅ | ✅ | ✅ | ✅ | [apache-2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| [FLUX.2 [klein] 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ✅ | ✅ | ✅ | ✅ | ✅ | [FLUX Non-Commercial License](model_licenses/LICENSE-FLUX-NON-COMMERICAL) |
-| [FLUX.2 [klein] 9B KV](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv) | ✅ | ✅ | ✅ | ✅ | ✅ | [FLUX Non-Commercial License](model_licenses/LICENSE-FLUX-NON-COMMERICAL) |
-| [FLUX.2 [klein] 4B Base](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) | ❌ | ❌ | ✅ | ✅ | ✅ | [apache-2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) |
-| [FLUX.2 [klein] 9B Base](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) | ❌ | ❌ | ✅ | ✅ | ✅ | [FLUX Non-Commercial License](model_licenses/LICENSE-FLUX-NON-COMMERICAL) |
-| [FLUX.2 [dev]](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❌ | ✅ | ✅ | ✅ | ✅ | [FLUX Non-Commercial License](model_licenses/LICENSE-FLUX-NON-COMMERICAL) |
+## Run it
 
-**All models support**: Text-to-Image ✅ | Single-ref Editing ✅ | Multi-ref Editing ✅
-
-## Which Model Should I Use?
-
-| Need | Recommended |
-|------|-------------|
-| Real-time apps, interactive workflows | [klein] 4B, 9B, or 9B KV (distilled) |
-| Consumer GPU (e.g. RTX 3090/4070) | [klein] 4B |
-| Fine-tuning, LoRA training | [klein] Base or FLUX.2 [dev] |
-| Maximum quality, no latency constraints | FLUX.2 [dev] |
-
-## `FLUX.2 [klein]`
-
-FLUX.2 [klein] is our fastest model family — generating and editing (multiple) images in under a second without sacrificing quality. Built for real-time applications, creative iteration, and deployment on consumer hardware.
-
-### Key Capabilities
-- **Sub-second inference** — Generate or edit images under a second on modern hardware
-- **Unified generation & editing** — Text-to-image, image editing, and multi-reference in one model
-- **Runs on consumer GPUs** — Klein 4B fits in ~8GB VRAM (RTX 3090/4070 and up)
-- **Apache 2.0 on 4B** — Open-source, fine-tuning, and customization
-
-### Performance
-
-Klein models define the Pareto frontier for quality vs. latency and VRAM across text-to-image, single-reference editing, and multi-reference generation:
-
-<p align="center">
-<img src="assets/klein_benchmark.jpg" alt="FLUX.2 [klein] vs Baselines — Elo vs Latency and VRAM" width="800"/>
-</p>
-<sub>Higher Elo + Lower Latency/VRAM = Better.</sub>
-
-### The Klein Family
-
-| Model | Best For |
-|:---|:---|
-| **[klein] 4B** | Maximum speed, consumer hardware, edge deployment |
-| **[klein] 9B** | High quality text-to-image; for image editing, 9B KV is faster at equal quality |
-| **[klein] 9B KV** | Best quality-to-latency ratio, faster than 4B for multi-reference image editing via [KV caching](docs/flux2_klein_kv_cache.md) |
-| **[klein] 4B Base** | Fine-tuning on limited hardware, full customization |
-| **[klein] 9B Base** | Research, LoRA training, maximum output diversity |
-
-**Distilled vs Base:**
-- Use **Distilled** (4-step) for production apps and real-time generation
-- Use **Base** (50-step) for fine-tuning, LoRA training, and maximum flexibility
-
-**Licensing:** 4B models are [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md). 9B models use the [FLUX.2-dev Non-Commercial License](model_licenses/LICENSE-FLUX-DEV).
-
-### Text-to-image examples
-
-Example focused on realism 
-![t2i-klein-grid](assets/t2i_klein_realism.jpg)
-
-Example focused on output diversity
-![t2i-klein-others](assets/t2i_klein_others.jpg)
-
-### Editing examples
-
-![i2i-klein](assets/i2i_klein.jpg)
-
-## `FLUX.2 [dev]`
-
-`FLUX.2 [dev]` is a 32B parameter flow matching transformer model capable of generating and editing (multiple) images. The model is released under the [FLUX.2-dev Non-Commercial License](model_licenses/LICENSE-FLUX-DEV) and can be found [here](https://huggingface.co/black-forest-labs/FLUX.2-dev).
-
-Note that the below script for `FLUX.2 [dev]` needs considerable amount of VRAM (H100-equivalent GPU). We partnered with Hugging Face to make quantized versions that run on consumer hardware; below you can find instructions on how to run it on a RTX 4090 with a remote text encoder, for other quantization sizes and combinations, check the [diffusers quantization guide here](docs/flux2_dev_hf.md).
-
-### Text-to-image examples
-
-![t2i-grid](assets/teaser_generation.png)
-
-### Editing examples
-
-![edit-grid](assets/teaser_editing.png)
-
-### Prompt upsampling
-
-`FLUX.2 [dev]` benefits significantly from prompt upsampling. The inference script below offers the option to use both local prompt upsampling with the same model we use for text encoding ([`Mistral-Small-3.2-24B-Instruct-2506`](https://huggingface.co/mistralai/Mistral-Small-3.2-24B-Instruct-2506)), or alternatively, use any model on [OpenRouter](https://openrouter.ai/) via an API call.
-
-See the [upsampling guide](docs/flux2_with_prompt_upsampling.md) for additional details and guidance on when to use upsampling.
-
-## `FLUX.2` autoencoder
-
-The FLUX.2 autoencoder has considerably improved over the [FLUX.1 autoencoder](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/ae.safetensors). The autoencoder is released under [Apache 2.0](https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md) and can be found [here](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors). For more information, see our [technical blogpost](https://bfl.ai/research/representation-comparison).
-
-## Local installation
-
-The inference code was tested on GB200 using CUDA 12.9 and Python 3.12.
+**Laptop: bring the patterns to one size.**
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e . --extra-index-url https://download.pytorch.org/whl/cu129 --no-cache-dir
+uv run python scripts/resize_tiles.py            # principled/test_patterns/** -> principled/tiles_1024/
+rsync -av principled/tiles_1024 <server>:<repo>/principled/
 ```
 
-## Run the CLI
+Each pattern is resampled as one period of a repeat, so resizing neither adds a seam nor hides one,
+and gets a plain ASCII name (`00_Original_Rose_Sample.png`). `tiles.csv` maps each back to its source.
 
-Before running the CLI, you may download the weights from [here](https://huggingface.co/black-forest-labs/FLUX.2-dev) and set the following environment variables.
+**Server: run the experiments.** One process per GPU, the tiles split between them.
 
 ```bash
-export FLUX2_MODEL_PATH="<flux2_path>"
-export AE_MODEL_PATH="<ae_path>"
-export KLEIN_4B_MODEL_PATH="<klein_4b_path>"
-export KLEIN_4B_BASE_MODEL_PATH="<klein_4b_base_path>"
-export KLEIN_9B_MODEL_PATH="<klein_9b_path>"
-export KLEIN_9B_KV_MODEL_PATH="<klein_9b_kv_path>"
-export KLEIN_9B_BASE_MODEL_PATH="<klein_9b_base_path>"
+uv run python scripts/run_experiments.py                         # all tiles, all three experiments, all GPUs
+uv run python scripts/run_experiments.py --only 00,03,19         # tiles by number ...
+uv run python scripts/run_experiments.py --only rose,ivy         # ... or by name
+uv run python scripts/run_experiments.py --tiles a.png,my/tiles  # any files, folders or globs
+uv run python scripts/run_experiments.py --experiments 1         # 1, 2, 3 or the full names
+uv run python scripts/run_experiments.py --band 64 --run_name band64
 ```
 
-If you don't set the environment variables, the weights will be downloaded automatically.
+| option | default | |
+| :-- | :-- | :-- |
+| `--band` | `128` | width of the white cross in experiment 1 |
+| `--border` | `band / 2` | width of the frame cut off and painted white in experiments 2 and 3 |
+| `--prompt` | the fill prompt in [`experiments.py`](src/seamless/experiments.py) | the instruction, or a `.txt` file holding it |
+| `--guidance` | `1.0` | 1 is the distilled recipe. Any other value is real CFG against the empty prompt: two passes per step |
+| `--num_steps` | `4` | |
+| `--seed` | `0` | |
+| `--wrap` | `True` | the seamless RoPE and the circular decode. `False` is stock FLUX.2 |
+| `--unanchor_text` | `False` | the text no longer marks an origin on the torus (see `torus.py`) |
+| `--model_name` | `flux.2-klein-9b` | any klein model |
+| `--gpus` | all | physical ids, `0,1,2,3`; otherwise `CUDA_VISIBLE_DEVICES`, otherwise every GPU |
+| `--run_name` | `<date>_<time>_band<band>` | the folder under `output/`; an existing run is never overwritten |
 
-You can start an interactive session to do both text to image generation as well as editing (one or multiple) images with the following command:
+Bands and borders that are multiples of 32 and 16 px keep the hole's edges on the model's 16 px
+token grid.
+
+**Without a GPU.** Two ways to check a run before spending GPU time on it:
 
 ```bash
-PYTHONPATH=src python scripts/cli.py
+uv run python scripts/run_experiments.py --dry_run            # the masks and model inputs, nothing generated
+uv run python scripts/run_experiments.py --toy --only 0,1     # random toy weights on the CPU: noise out, all code run
+uv run python scripts/torus_selftest.py                       # the wrapped attention against its definition
 ```
 
-## Watermarking
+## What comes out
 
-We've added an option to embed invisible watermarks directly into the generated images
-via the [invisible watermark library](https://github.com/ShieldMnt/invisible-watermark).
-
-Additionally, we are recommending implementing a solution to mark the metadata of your outputs, such as [C2PA](https://c2pa.org/)
-
-## Citation
-
-If you find the provided code or models useful for your research, consider citing them as:
-
-```bib
-@misc{flux-2-2025,
-    author={Black Forest Labs},
-    title={{FLUX.2: Frontier Visual Intelligence}},
-    year={2025},
-    howpublished={\url{https://bfl.ai/blog/flux-2}},
-}
 ```
+output/<run_name>/
+    index.html                  every tile x experiment: thumbnail, numbers, links
+    summary.csv                 the same numbers, one row per job
+    config.json                 everything needed to repeat the run
+    logs/gpu<k>.log
+    1_seam_fix/<tile>/
+        1_original.png          the tile
+        2_original_2x2.png      ... repeated 2 x 2
+        3_rolled.png            rolled by half: the seams cross in the middle
+        4_masked.png            the cross painted white          <- what the model is given
+        5_generated.png         what the model returns
+        6_unrolled.png          rolled back                      <- the result
+        7_unrolled_2x2.png      ... repeated 2 x 2
+        sheet.png               all of the above in one picture
+        thumb.jpg  run.json
+    2_outpaint_frame/<tile>/    1_original  2_original_2x2  3_crop  4_crop_2x2  5_padded  6_generated  7_generated_2x2
+    3_outpaint_cross/<tile>/    1_original  2_original_2x2  3_crop  4_crop_2x2  5_padded  6_rolled  7_generated  8_unrolled  9_unrolled_2x2
+```
+
+`sheet.png` holds every step at its own pixel size, nothing resampled, so zooming into the sheet is
+zooming into the step. What is drawn on it sits in the margins, never on a picture:
+
+- **red arrows**: a seam, the line where the tile's own edges meet. Through the middle of a rolled
+  picture; where the copies touch in a 2 x 2.
+- **blue arrows**: where the edges of the *generated* picture meet once it is rolled back. Nothing
+  was masked there, so it shows whether the model's output closes up on itself.
+- **amber bars**: the extent of the hole, i.e. what is new in the output.
+
+A sheet is 15-25 MB and a full run of 21 tiles is about 2.5 GB. To look at one from the laptop,
+copy it (`rsync -av <server>:<repo>/output/<run> .`) or serve it and open `http://localhost:8000`:
+
+```bash
+python -m http.server 8000 --bind 127.0.0.1 --directory output/<run>     # on the server
+ssh -L 8000:localhost:8000 <server>                                      # on the laptop
+```
+
+### The numbers
+
+| | |
+| :-- | :-- |
+| `seam_before`, `seam_after` | seam jump of the tile the experiment starts from, and of the result |
+| `wrap_after` | the same measure where the generated picture's own edges meet (rolled experiments) |
+| `kept_psnr` | dB between the model's input and its output outside the hole: how much it changed what it was told to keep |
+
+A *seam jump* is the mean absolute difference across a line, divided by the median of the same over
+every parallel line of the picture; 1 means the line is like any other. It sees a hard cut. It does
+not see a join that is smooth but wrong (a stem that bends, a motif that changes shape), which is
+what the sheets are for.
+
+## Code
+
+```
+scripts/resize_tiles.py       step 0: patterns of any size -> 1024 x 1024
+scripts/run_experiments.py    step 1: jobs over GPUs, then the report
+scripts/torus_selftest.py     the method checked on toy weights
+src/seamless/tiles.py         roll, mask, crop, pad, repeat, seam jump        (numpy, PIL)
+src/seamless/experiments.py   the three experiments as the pictures they make
+src/seamless/sheet.py         the comparison sheet
+src/seamless/klein.py         FLUX.2 klein image-to-image on the torus        (the only GPU code)
+src/seamless/worker.py        one GPU's share of a run
+src/seamless/report.py        index.html and summary.csv
+src/flux2/torus.py            the seamless RoPE: attention with the nearest periodic copy
+src/flux2/                    otherwise the FLUX.2 reference implementation, unchanged
+```
+
+## Licence
+
+The code in `src/flux2` other than `torus.py` is Black Forest Labs' FLUX.2 inference code
+([LICENSE.md](LICENSE.md)). The FLUX.2 [klein] 9B weights are under the
+[FLUX Non-Commercial License](model_licenses/LICENSE-FLUX-NON-COMMERICAL).

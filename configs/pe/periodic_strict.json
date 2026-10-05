@@ -1,1 +1,0 @@
-{"note": "The ERP reference's rule: snap only planes already within 10% of a whole number of turns; everything else as trained.", "mode": "periodic", "min_cycles": 1.0, "max_rel_error": 0.1, "low_freq": "keep", "scope": "image"}

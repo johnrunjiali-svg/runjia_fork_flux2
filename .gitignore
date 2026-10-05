@@ -238,3 +238,8 @@ output/
 
 # 664 MB gigapixel scan, over GitHub's 100 MB limit; Starry_Night_2k.jpg is the copy to push
 reference_images/Starry_Night.jpg
+
+### this repo ###
+# runs of scripts/run_experiments.py, and the raw test patterns (the 1024 px copies are made by scripts/resize_tiles.py)
+output/
+principled/test_patterns/

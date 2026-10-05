@@ -1,1 +1,0 @@
-{"note": "Snap every plane that makes >= 1 turn across the image (8 of 28 per axis at 1024^2) to whole turns; leave the slower planes as trained. Fused attention.", "mode": "periodic", "min_cycles": 1.0, "low_freq": "keep", "rounding": "nearest", "scope": "image"}

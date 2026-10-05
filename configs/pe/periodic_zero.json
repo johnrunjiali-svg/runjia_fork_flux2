@@ -1,1 +1,0 @@
-{"note": "Snap the fast planes and drop the slow ones (constant). All planes periodic; with unanchored text this is exactly roll-equivariant.", "mode": "periodic", "min_cycles": 1.0, "low_freq": "zero", "unanchor_text": true, "scope": "image"}
