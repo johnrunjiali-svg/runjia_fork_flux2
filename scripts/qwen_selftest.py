@@ -311,6 +311,16 @@ def main():
     W, H = 96, 64
     tile = generate(pipe, "a tile", seed=1, width=W, height=H, num_steps=3, pe=PeConfig(q_chunk=5))
     assert tile.shape == (H, W, 3) and tile.dtype == torch.uint8
+    # the transformer comes back stock: fused processor, no wrapping in the rope wrapper, no geometry
+    assert isinstance(pipe.transformer.transformer_blocks[0].attn.processor, QwenImage21AttnProcessor)
+    assert not pipe.transformer.pos_embed.cfg.periodic and pipe.ctx.geo is None
+    # seamless off == stock position encoding: the wrapper's table is the stock module's, and the
+    # processor it installs is the stock one, even with mode "nearest" selected
+    from qwen_torus.generate import STOCK
+
+    install(pipe.transformer, pipe.ctx, PeConfig(mode="nearest", wrap_h=False, wrap_w=False))
+    assert isinstance(pipe.transformer.transformer_blocks[0].attn.processor, QwenImage21AttnProcessor)
+    assert not pipe.transformer.pos_embed.cfg.nearest and STOCK.needs_manual_attention is False
     ref = Image.fromarray(np.random.default_rng(0).integers(0, 255, (H, W, 3), dtype=np.uint8))
     style = Image.fromarray(np.random.default_rng(1).integers(0, 255, (40, 70, 3), dtype=np.uint8))
     for cfg in (
@@ -361,6 +371,29 @@ def main():
     for wrap in [(True, True), (False, True), (False, False)]:
         assert decode_latents(pipe, x, (4, 6), wrap, pad=2).shape == (1, 4, 64, 96), wrap
     print("ok   decode_latents shapes")
+
+    # 9. seam_ratio: ~1 on a field that repeats, well above 1 on one with an edge; generate reports it
+    from qwen_torus.prep import seam_ratio
+
+    # The ratio compares one pair of rows with the average pair, so it is a statistical measure: a
+    # textured field that wraps (circularly low-passed noise -- what the FFT makes periodic) scores
+    # ~1, the same field plus a ramp scores far above it. A single smooth sinusoid would not: its
+    # wrap pair sits at one phase of the cycle, where the neighbour difference is not the average one.
+    rng = np.random.default_rng(0)
+    spectrum = np.fft.fft2(rng.normal(size=(96, 128, 3)), axes=(0, 1))
+    fy, fx = np.meshgrid(np.fft.fftfreq(96), np.fft.fftfreq(128), indexing="ij")
+    spectrum *= (np.hypot(fy, fx) < 0.3)[..., None]
+    periodic = np.fft.ifft2(spectrum, axes=(0, 1)).real
+    yy, xx = np.meshgrid(np.arange(96), np.arange(128), indexing="ij")
+    edged = periodic + np.stack([xx / 128.0, yy / 96.0, xx * 0], -1) * periodic.std() * 20
+    assert all(abs(r - 1) < 0.25 for r in seam_ratio(periodic)), seam_ratio(periodic)
+    assert all(r > 5 for r in seam_ratio(edged)), seam_ratio(edged)
+    info = {}
+    generate(pipe, "p", seed=3, width=W, height=H, num_steps=2, pe=PeConfig(q_chunk=5), info=info)
+    assert set(info) == {"seam_latent", "seam_pixels"} and len(info["seam_latent"]) == 2
+    print(
+        f"ok   seam_ratio: periodic {seam_ratio(periodic)[1]:.2f}, edged {seam_ratio(edged)[1]:.1f}; generate reports it"
+    )
     print("all passed")
 
 

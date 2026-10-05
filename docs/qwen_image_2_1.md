@@ -258,3 +258,41 @@ PYTHONPATH=src uv run python scripts/qwen_cli.py --measure_vae     # the decoder
 `PeConfig` fields (`src/qwen_torus/rope.py`): `mode`, `wrap_h`, `wrap_w`, `unanchor_text`,
 `min_cycles`, `max_rel_error`, `rounding`, `low_freq`, `scope`, `q_chunk`. `describe_tables(rope,
 cfg, grid)` prints what a config does to every plane before spending GPU time.
+
+**Seamless off is stock.** With both wraps off (`STOCK`, what the page sends when the seamless box is
+unticked) `cfg.nearest` and `cfg.periodic` are both false: the rope wrapper returns the stock table
+and `install` puts the stock fused processor back, whatever `mode` says. Only `unanchor_text` still
+forces the hand-written path. `generate` restores that state when it returns (or fails), so
+`pipe.pipe(...)` — the untouched `QwenImage21Pipeline` — is always available for an A/B. What
+`generate` with `STOCK` and `geo_guidance=0` still does differently from `pipe.pipe(...)`: it keeps
+the latent in fp32 between Euler steps (the stock pipeline rounds to bf16 every step), resizes the
+first condition image to the output size instead of to a 1024²-area box, and composites the RGBA
+result over white. Same seed gives the same initial noise.
+
+## 6. Managing experiments
+
+The unit of an experiment is a **position-encoding config**, and it is deliberately separate from
+the sampling settings (prompt, seed, steps, guidance, seamless strength, size), which are the same
+across a comparison.
+
+- **`configs/pe/*.json`** are the named variants: one file per idea, a `note` saying what it tests,
+  only the fields that differ from the defaults. Add a file to add a variant; nothing else changes.
+  The ones there now: `stock`, `nearest`, `nearest_unanchored`, `periodic_keep`,
+  `periodic_keep_half`, `periodic_fundamental`, `periodic_zero`, `periodic_strict`,
+  `periodic_all_tokens`, `both`.
+- **A config can be given four ways**, all through `PeConfig.load`: a file path (`--pe
+  configs/pe/periodic_keep.json`), a json string (`--pe '{"mode":"periodic","min_cycles":0.5}'`), a
+  dict / `PeConfig(...)` in Python, or the preset buttons in the web page, which fill the fields and
+  can then be edited by hand.
+- **Sweeps**: `scripts/qwen_cli.py --sweep configs/pe --prompts prompts/x.txt --seed 0` runs every
+  prompt under every preset with the same seed, named `<slug>_<seed>_<preset>.png`, so the pictures
+  of one prompt sit next to each other in the folder and differ only in the config.
+- **Records**: every CLI image has a `.json` next to it, and every web run has `run.json` in its
+  folder, with the full resolved config (`pe`) plus every sampling setting, the reference, the mask
+  and the outlines. A run is reproducible from that folder alone.
+- **Before spending GPU time** on a `periodic` variant, `describe_tables` shows which planes it
+  changes and to what, per axis, for the grid you are about to use.
+
+What to vary first, in order of how much it changes: `mode` (nearest vs periodic), `unanchor_text`,
+then inside periodic `min_cycles` / `low_freq` (which planes are made periodic and how), then
+`scope`; `rounding` and `max_rel_error` are refinements. `q_chunk` only trades memory for speed.

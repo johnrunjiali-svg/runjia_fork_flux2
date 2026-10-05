@@ -1,0 +1,1 @@
+{"note": "As periodic_keep but planes making >= 0.5 turns are snapped too: the 0.73-turn plane is stretched to one full turn.", "mode": "periodic", "min_cycles": 0.5, "low_freq": "keep", "rounding": "nearest", "scope": "image"}

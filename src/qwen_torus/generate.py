@@ -33,7 +33,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from .attention import TorusContext, install
-from .prep import TORUS_PROMPT, fit_area
+from .prep import TORUS_PROMPT, fit_area, seam_ratio
 from .rope import PeConfig, build_geometry
 
 # One-sided receptive field of the VAE decoder in latent pixels (= tokens: 2.1 is unpatched, 16 px
@@ -44,6 +44,10 @@ DECODE_PAD_TOKENS = 18
 
 # Where `generate` starts the sampler when it is given an init image and no explicit t_start.
 INIT_T_START = 0.6
+
+# No wrapping, stock table, stock fused processor: what `generate` leaves installed, and what the web
+# page's "seamless" box sends when it is off (together with seamless strength 0).
+STOCK = PeConfig(mode="none", wrap_h=False, wrap_w=False)
 
 # Qwen/Qwen-Image-2.1/scheduler/scheduler_config.json; read from the loaded scheduler when there is one.
 SCHEDULER_DEFAULTS = dict(
@@ -239,11 +243,15 @@ def generate(
     paste_kept_pixels: bool = True,
     decode_pad: int = DECODE_PAD_TOKENS,
     on_step=None,  # on_step(steps_done, steps_total)
+    info: dict | None = None,  # filled with what the run measured: seam_latent, seam_pixels (rows, columns)
 ) -> Tensor:
     """Returns uint8 [height, width, 3] on the CPU. Sizes must be multiples of 32: a token is 16 px and
-    the vision encoder's slots are 2x2 tokens."""
+    the vision encoder's slots are 2x2 tokens.
+
+    `info["seam_latent"]` is `seam_ratio` of the final latent grid -- the transformer's own seam, before
+    the decoder can hide or add anything -- and `info["seam_pixels"]` the same on the picture."""
     assert width % 32 == 0 and height % 32 == 0, f"{width}x{height}: sizes must be multiples of 32"
-    pe = PeConfig.from_dict(pe) if isinstance(pe, dict) else (pe or PeConfig())
+    pe = PeConfig.load(pe)  # a PeConfig, a dict, a json string or the path of a configs/pe/*.json file
     gh, gw = height // 16, width // 16
     n_t = gh * gw
     device, dtype = pipe.device, pipe.dtype
@@ -287,58 +295,75 @@ def generate(
     assert init_image is not None or t_start == 1.0, "t_start < 1 starts from the init image; give one"
     x = noise if t_start == 1.0 else (1 - t_start) * clean + t_start * noise
 
-    # 4. Position: the rope wrapper and, if needed, the hand-written attention.
-    rope = install(transformer, pipe.ctx, pe)
-    pipe.ctx.geo = build_geometry(rope, pe, (gh, gw), device)
-    timesteps = schedule(num_steps, n_t, t_start, pipe.scheduler_config)
-
-    # 5. Euler flow matching, one forward per branch per step, prefix KV cached after the first step.
+    # 4. Position: the rope wrapper and, if needed, the hand-written attention. Whatever happens, the
+    #    transformer is handed back in its stock state, so `pipe.pipe(...)` after this is plain Qwen.
     from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21KVCache
 
-    caches = [QwenImage21KVCache(len(transformer.transformer_blocks)) for _ in branches]
-    img_shapes = [[*cond_shapes, (1, gh, gw)]]
-    for step, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
-        v = torch.zeros_like(x)
-        for (weight, _), (embeds, pad_mask), cache in zip(branches, encoded, caches):
-            pipe.ctx.prefix_is_text = ~_joint_mask(pad_mask)
-            hidden = (
-                x.to(dtype)
-                if prefix_latents is None
-                else torch.cat([prefix_latents.to(dtype), x.to(dtype)], dim=1)
-            )
-            pred = transformer(
-                hidden_states=hidden,
-                encoder_hidden_states=embeds,
-                timestep=torch.full((1,), t_curr, device=device, dtype=torch.float32),
-                img_shapes=img_shapes,
-                img_mask=torch.cat([pad_mask, pad_mask.new_ones(1, n_t // 4)], dim=1),
-                kv_cache=cache,
-                kv_cache_mode="extract" if step == 0 else "cached",
-                return_dict=False,
-            )[0][:, -n_t:].float()
-            v = v + weight * pred
-        x = x + (t_prev - t_curr) * v
-        if keep is not None:
-            x = torch.where(keep, (1 - t_prev) * clean + t_prev * noise, x)
-        if on_step is not None:
-            on_step(step + 1, num_steps)
+    try:
+        rope = install(transformer, pipe.ctx, pe)
+        pipe.ctx.geo = build_geometry(rope, pe, (gh, gw), device)
+        timesteps = schedule(num_steps, n_t, t_start, pipe.scheduler_config)
 
-    # 6. Pixels.
-    out = decode_latents(pipe, x, (gh, gw), pe.wrap, decode_pad)
+        # 5. Euler flow matching, one forward per branch per step, prefix KV cached after the first step.
+        caches = [QwenImage21KVCache(len(transformer.transformer_blocks)) for _ in branches]
+        img_shapes = [[*cond_shapes, (1, gh, gw)]]
+        for step, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+            v = torch.zeros_like(x)
+            for (weight, _), (embeds, pad_mask), cache in zip(branches, encoded, caches):
+                pipe.ctx.prefix_is_text = ~_joint_mask(pad_mask)
+                hidden = (
+                    x.to(dtype)
+                    if prefix_latents is None
+                    else torch.cat([prefix_latents.to(dtype), x.to(dtype)], dim=1)
+                )
+                pred = transformer(
+                    hidden_states=hidden,
+                    encoder_hidden_states=embeds,
+                    timestep=torch.full((1,), t_curr, device=device, dtype=torch.float32),
+                    img_shapes=img_shapes,
+                    img_mask=torch.cat([pad_mask, pad_mask.new_ones(1, n_t // 4)], dim=1),
+                    kv_cache=cache,
+                    kv_cache_mode="extract" if step == 0 else "cached",
+                    return_dict=False,
+                )[0][:, -n_t:].float()
+                v = v + weight * pred
+            x = x + (t_prev - t_curr) * v
+            if keep is not None:
+                x = torch.where(keep, (1 - t_prev) * clean + t_prev * noise, x)
+            if on_step is not None:
+                on_step(step + 1, num_steps)
+
+        # 6. Pixels.
+        out = decode_latents(pipe, x, (gh, gw), pe.wrap, decode_pad)
+    finally:
+        install(transformer, pipe.ctx, STOCK)
+        pipe.ctx.geo = None
     if keep is not None and paste_kept_pixels:
         mask = grid.repeat_interleave(16, 0).repeat_interleave(16, 1)
         out = torch.where(mask, init_pixels[:, :, 0].float(), out)
     pipe.free()
-    return to_rgb(out)[0]
+    rgb = to_rgb(out)[0]
+    if info is not None:
+        info["seam_latent"] = seam_ratio(x[0].reshape(gh, gw, -1))
+        info["seam_pixels"] = seam_ratio(rgb)
+    return rgb
 
 
 @torch.no_grad()
-def measure_decoder_receptive_field(vae, grid: int = 64, channel: int = 0, eps: float = 1e-3) -> int:
+def measure_decoder_receptive_field(
+    vae, grid: int = 64, channel: int = 0, eps: float = 1e-3, device=None
+) -> int:
     """One-sided receptive field of the decoder in latent pixels, measured: decode a zero latent and the
     same with one latent pixel perturbed, and see how far the output differs. Run once on the real VAE
     (seconds on a GPU) to check DECODE_PAD_TOKENS; the mid block's global attention makes the strict
-    answer "everything", so `eps` cuts off the tail."""
-    device, dtype = next(vae.parameters()).device, next(vae.parameters()).dtype
+    answer "everything", so `eps` cuts off the tail.
+
+    `device` is where the VAE *runs*. Under cpu offload its weights sit on the CPU until `decode` is
+    called and accelerate's hook moves the module -- not the inputs -- so the input has to be built on
+    the execution device, which the hook knows."""
+    hook = getattr(vae, "_hf_hook", None)
+    device = device or getattr(hook, "execution_device", None) or next(vae.parameters()).device
+    dtype = next(vae.parameters()).dtype
     z = torch.zeros(1, vae.config.z_dim, 1, grid, grid, device=device, dtype=dtype)
     base = vae.decode(z).sample.float()
     z[0, channel, 0, grid // 2, grid // 2] = 1.0

@@ -1,0 +1,1 @@
+{"note": "nearest + text unanchored: the network is exactly blind to where the image was cut (roll-equivariant).", "mode": "nearest", "unanchor_text": true}

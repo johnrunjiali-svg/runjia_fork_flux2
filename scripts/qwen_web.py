@@ -31,6 +31,7 @@ import torch
 from PIL import Image
 
 from qwen_torus import FILL_PROMPT, OUTLINE_COLORS, OUTLINE_PROMPT, TORUS_PROMPT, PeConfig, generate, views
+from qwen_torus.rope import load_presets
 
 PAGE = Path(__file__).with_name("qwen_web.html")
 OUT = Path("output/qwen_web")
@@ -81,6 +82,7 @@ def run(pipe, req: dict) -> dict:
         cond_images=([reference, *extra] if reference else extra) or None,
         ref_max_pixels=int(s["ref_max_pixels"]),
         on_step=lambda step, total: progress.update(step=step, total=total),
+        info=(info := {}),
     )
     seconds = time.time() - started
 
@@ -110,6 +112,7 @@ def run(pipe, req: dict) -> dict:
                 "num_extra_refs": len(extra),
                 "model_name": pipe.model_name,
                 "seconds": round(seconds, 1),
+                **info,  # seam_latent, seam_pixels: (rows, columns), 1 = no seam
             },
             indent=2,
         )
@@ -119,6 +122,7 @@ def run(pipe, req: dict) -> dict:
         "run": stamp,
         "saved": str(folder),
         "seconds": round(seconds, 1),
+        "seam": info,
     }
 
 
@@ -145,6 +149,9 @@ def make_handler(pipe):
             "outline_colors": OUTLINE_COLORS,
             "geo_prompt": TORUS_PROMPT,
             "pe": PeConfig().to_dict(),
+            "presets": load_presets(
+                Path(__file__).parents[1] / "configs" / "pe"
+            ),  # the page's preset buttons
         }
     ).encode()
 

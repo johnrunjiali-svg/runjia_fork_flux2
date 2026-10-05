@@ -5,12 +5,13 @@ pipe = QwenTorusPipe()                                   # cpu offload on; one m
 tile = generate(pipe, "seamless rose pattern", seed=0, pe=PeConfig(mode="nearest"))   # uint8 [H, W, 3]
 """
 
-from .generate import DECODE_PAD_TOKENS, QwenTorusPipe, generate, guidance_weights, schedule
+from .generate import DECODE_PAD_TOKENS, STOCK, QwenTorusPipe, generate, guidance_weights, schedule
 from .prep import FILL_PROMPT, OUTLINE_COLORS, OUTLINE_PROMPT, TORUS_PROMPT, roll, unroll, views
 from .rope import PeConfig
 
 __all__ = [
     "DECODE_PAD_TOKENS",
+    "STOCK",
     "FILL_PROMPT",
     "OUTLINE_COLORS",
     "OUTLINE_PROMPT",

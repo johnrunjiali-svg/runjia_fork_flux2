@@ -111,6 +111,20 @@ def views(tile: Image.Image, dx: int = 0, dy: int = 0) -> dict[str, Image.Image]
     return out
 
 
+def seam_ratio(field) -> tuple[float, float]:
+    """How visible the wrap is, as two numbers (rows, columns): the mean absolute difference between
+    the last and the first row (column) divided by the mean absolute difference between adjacent rows
+    (columns) inside. About 1 for a field that really repeats, several for one with an edge. Takes a
+    PIL image, a uint8 [H, W, 3] array/tensor, or any [H, W, C] float field such as a latent grid, so
+    the same number can be read before the decoder (the transformer's seam) and after it (the pixels')."""
+    x = np.asarray(field.detach().cpu() if hasattr(field, "detach") else field, dtype=np.float64)
+    wrap_h = np.abs(x[0] - x[-1]).mean()
+    wrap_w = np.abs(x[:, 0] - x[:, -1]).mean()
+    inner_h = np.abs(x[1:] - x[:-1]).mean()
+    inner_w = np.abs(x[:, 1:] - x[:, :-1]).mean()
+    return float(wrap_h / max(inner_h, 1e-12)), float(wrap_w / max(inner_w, 1e-12))
+
+
 def fit_area(image: Image.Image, max_pixels: int, multiple: int = 32) -> Image.Image:
     """Shrink (never enlarge) to at most `max_pixels`, keeping the aspect ratio, sides a multiple of
     `multiple` -- 32 for Qwen-Image 2.1, whose vision slots are 2x2 tokens of 16 px."""

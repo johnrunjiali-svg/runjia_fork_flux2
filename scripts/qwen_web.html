@@ -190,6 +190,8 @@
         on restores the strength you had.</p>
       <details style="margin-top:10px">
         <summary class="hint">Position encoding</summary>
+        <div class="row" id="presets"><span class="hint" style="margin:0">Presets:</span></div>
+        <p class="hint tight" id="presetNote">A preset fills the fields below from configs/pe/&lt;name&gt;.json; edit them freely afterwards. The run records whatever was sent.</p>
         <div class="row">
           <label>Mode <select id="pe_mode">
             <option value="nearest">nearest copy (displacement mod n)</option>
@@ -289,9 +291,16 @@ fetch("/info").then(r => r.json()).then(info => {
   $("num_steps").value = info.defaults.num_steps;
   $("guidance").value = info.defaults.guidance;
   $("geo_guidance").value = info.defaults.geo_guidance;
-  for (const [k, v] of Object.entries(info.pe)) {
-    const el = $("pe_" + k); if (!el) continue;
-    if (el.type === "checkbox") el.checked = v; else el.value = v ?? "";
+  applyPe(info.pe);
+  for (const [name, cfg] of Object.entries(info.presets || {})) {
+    const b = document.createElement("button");
+    b.className = "b"; b.textContent = name; b.title = cfg.note || "";
+    b.onclick = () => {
+      applyPe({ ...info.pe, ...cfg });                      // unset fields fall back to the defaults
+      for (const o of $("presets").children) o.classList.toggle("on", o === b);
+      $("presetNote").textContent = cfg.note || `configs/pe/${name}.json`;
+    };
+    $("presets").append(b);
   }
   for (const [name, rgb] of Object.entries(info.outline_colors)) {
     const sw = document.createElement("button");
@@ -682,6 +691,15 @@ function insertOutline(name) {
   p.setSelectionRange(i, i + 1);
 }
 
+// a config (the defaults, or a preset) into the position-encoding fields; the seamless box follows the wraps
+function applyPe(cfg) {
+  for (const [k, v] of Object.entries(cfg)) {
+    const el = $("pe_" + k); if (!el) continue;
+    if (el.type === "checkbox") el.checked = v; else el.value = v ?? "";
+  }
+  $("wrap").checked = $("pe_wrap_h").checked || $("pe_wrap_w").checked;
+}
+
 // ───────────────────────────── seamless on / off ─────────────────────────────
 // Off: the seamless strength goes to 0 and the wrapping stops. On: both come back as they were set.
 let geoBefore = null;
@@ -710,7 +728,10 @@ function show(entry) {
   shown = entry;
   document.querySelector('[data-view="unrolled"]').disabled = !entry.out.unrolled;
   for (const img of $("history").children) img.classList.toggle("on", img.dataset.run === entry.out.run);
-  $("saved").textContent = `Seed ${entry.body.settings.seed} · ${entry.out.seconds} s · ${entry.out.saved}`;
+  // seam ratios: difference across the wrap over the difference between neighbours, (rows, columns); 1 = no seam
+  const s = entry.out.seam, f = v => v.map(x => x.toFixed(2)).join("/");
+  const seam = s ? ` · seam latent ${f(s.seam_latent)} px ${f(s.seam_pixels)}` : "";
+  $("saved").textContent = `Seed ${entry.body.settings.seed} · ${entry.out.seconds} s · ${entry.out.saved}${seam}`;
   showView(shown.out[current] ? current : "tile");
 }
 

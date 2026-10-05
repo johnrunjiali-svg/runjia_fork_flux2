@@ -32,8 +32,10 @@ image was cut. Condition images (references) are never touched: they are flat pi
 pairs with the target keep the stock displacement, which is what aligns an edit with its reference.
 """
 
+import json
 import math
 from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 
 import torch
 from torch import Tensor, nn
@@ -69,6 +71,19 @@ class PeConfig:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def load(cls, spec) -> "PeConfig":
+        """Anything a config can arrive as: a PeConfig, a dict of fields, a json string, or the path of
+        a json file (configs/pe/*.json are the named presets). None is the default config."""
+        if spec is None:
+            return cls()
+        if isinstance(spec, cls):
+            return spec
+        if isinstance(spec, (str, Path)):
+            path = Path(spec)
+            spec = json.loads(path.read_text() if path.suffix == ".json" and path.exists() else str(spec))
+        return cls.from_dict(spec)
+
     def __post_init__(self):
         assert self.mode in ("nearest", "periodic", "both", "none"), self.mode
         assert self.rounding in ("nearest", "floor", "ceil"), self.rounding
@@ -94,6 +109,15 @@ class PeConfig:
         """The nearest-copy rule picks a key copy per query, and unanchoring rotates the query one way for
         text and another for images: neither fits a fused kernel. Everything else does."""
         return self.nearest or self.unanchor_text
+
+
+def load_presets(folder) -> dict[str, dict]:
+    """{name: fields} for every json file in `folder`, by name. A file may carry a `note` for people;
+    `PeConfig.from_dict` ignores it."""
+    folder = Path(folder)
+    return (
+        {p.stem: json.loads(p.read_text()) for p in sorted(folder.glob("*.json"))} if folder.is_dir() else {}
+    )
 
 
 def inv_freq(dim: int, theta: float) -> Tensor:
