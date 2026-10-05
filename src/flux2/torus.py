@@ -103,10 +103,11 @@ def build_torus_geometry(
     index = torch.arange(ids.shape[1], device=ids.device)
     is_txt = index < num_txt
     is_img = (index >= num_txt) & (index < num_txt + x_ids.shape[1])
-    img_img = is_img[:, None] & is_img[None, :]
+    img_img = is_img[:, None] & is_img[None, :] # [N, N], only True when both token are img tokens
 
     ids_copy = ids.clone()
     use_copy = []
+    # axis 1 is the h axis, axis 2 is the w sxia. grid is the image's shape of h and w
     for axis, n, do_wrap in ((1, grid[0], wrap[0]), (2, grid[1], wrap[1])):
         # The whole idea, on the n coordinates of one axis.
         r = torch.arange(n, device=ids.device)

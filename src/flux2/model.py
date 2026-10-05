@@ -816,9 +816,18 @@ def causal_attn_fn(
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
+    """pos are ids, of shape (B, N), N is the number of tokens
+    dim is 32 is flux, one 128 head is part to 4 * 32
+    out is of shape (B, N, dim / 2, 2, 2). out[b, n] is the rotary matrix for token b, n
+    """
     assert dim % 2 == 0
+    # scale = 0/16, 1/16, 2/16, ..., 15/16 when dim = 32
     scale = torch.arange(0, dim, 2, dtype=pos.dtype, device=pos.device) / dim
-    omega = 1.0 / (theta**scale)
+    # Frequencies are logarithmically spaced:
+    # omega_i = theta^(-2i / dim)
+    # ranging from 1 down toward 1/theta
+    omega = 1.0 / (theta**scale) 
+    # outer product, out[b, n ,d] is pos[b, n] * omega[d], 
     out = torch.einsum("...n,d->...nd", pos, omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
     out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
