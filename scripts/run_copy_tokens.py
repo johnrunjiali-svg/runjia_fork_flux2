@@ -12,7 +12,8 @@ Inpainting, the task of experiment 3 (centre crop on a white canvas, rolled so t
 
 Text to image, the prompt alone:
 
-    uv run python scripts/run_copy_tokens.py --task t2i --prompts prompts.txt       one prompt per line (blank and # lines skipped)
+    uv run python scripts/run_copy_tokens.py --task t2i                             the 8 prompts of principled/t2i_prompts.txt
+    uv run python scripts/run_copy_tokens.py --task t2i --prompts prompts.txt       another file, one prompt per line (blank and # lines skipped)
     uv run python scripts/run_copy_tokens.py --task t2i --prompts "moss on stone"   or one prompt
     uv run python scripts/run_copy_tokens.py --task t2i --prompts p.txt --size 1024 --system_prompt none
 
@@ -59,7 +60,7 @@ def main(
     task: str = "3_outpaint_cross",  # 1_seam_fix, 2_outpaint_frame, 3_outpaint_cross (inpainting) or t2i
     tiles: str = "principled/tiles_1024",  # inpainting: folders, files or globs, comma separated
     only=None,  # of those, the ones whose leading number or name matches: 00,03,19 or rose,ivy
-    prompts: str | None = None,  # t2i: a .txt with one prompt per line, or one prompt
+    prompts: str = "principled/t2i_prompts.txt",  # t2i: a .txt with one prompt per line, or one prompt
     size: int = 1024,  # t2i: the square picture
     bands="0,4,16",  # copy band in tokens (16 px each); 0 is stock attention
     compare_rope: bool = True,  # one more column: the nearest-copy RoPE of experiments 1-3

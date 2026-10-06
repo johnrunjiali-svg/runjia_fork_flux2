@@ -1,0 +1,11 @@
+# Experiment 4, text to image: one prompt per line, blank and # lines are skipped.
+# Eight typical kinds of tileable pattern, in rising order of how much a seam would show:
+# organic textures forgive a lot, lattices and figurative motifs forgive nothing.
+a close-up photograph of rough grey granite, fine speckled grain, even lighting
+green moss and lichen growing on a damp stone wall, macro photograph
+weathered oak planks with visible wood grain and small knots, natural light
+a bed of smooth river pebbles in grey, beige and rust, seen from directly above
+an Islamic geometric star-and-polygon pattern in deep blue, turquoise and gold on white, flat vector style
+a vintage floral wallpaper with pink roses and green leaves on a cream background, dense repeating design
+retro mid-century abstract shapes, mustard, teal and coral on off-white, flat illustration
+hand-drawn ink illustration of tropical leaves, flamingos and pineapples on a pastel blue background
