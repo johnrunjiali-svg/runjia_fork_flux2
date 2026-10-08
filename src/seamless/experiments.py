@@ -56,6 +56,16 @@ FILL_PROMPT = (
 )
 
 
+def rope_label(config: dict) -> str:
+    """How the RoPE was made periodic, for a header: 'nearest', 'quantized', 'quantized r r f f k k ...' or 'OFF'."""
+    if not config["wrap"]:
+        return "OFF"
+    label = config.get("rope", "nearest")
+    if config.get("rules"):
+        label += " " + " ".join(str(r) if isinstance(r, int) else r[0] for r in config["rules"])
+    return label
+
+
 @dataclass(frozen=True)
 class Experiment:
     name: str  # the folder it writes to
@@ -227,7 +237,7 @@ def header(exp: Experiment, record: dict, config: dict) -> list[str]:
     else:
         settings = (
             f"{config['model_name']}   {config['num_steps']} steps   guidance {config['guidance']:g}"
-            f"   seamless RoPE {config['rope'] if config['wrap'] else 'OFF'}   seed {config['seed']}"
+            f"   seamless RoPE {rope_label(config)}   seed {config['seed']}"
             f"   {record['seconds']:.1f} s"
         )
         if record["same_generation_as"]:

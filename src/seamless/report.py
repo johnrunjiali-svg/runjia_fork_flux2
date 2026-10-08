@@ -10,6 +10,8 @@ import json
 import statistics
 from pathlib import Path
 
+from .experiments import rope_label
+
 METRICS = {
     "seam_before": "seam jump of the tile the experiment starts from (1 = like any other line)",
     "seam_after": "seam jump of the result",
@@ -72,7 +74,7 @@ def write_report(run_dir: str) -> Path:
         out.append(
             f"<p>{html.escape(config['model_name'])}{' (TOY WEIGHTS: noise)' if config['toy'] else ''} &middot; "
             f"{config['num_steps']} steps &middot; guidance {config['guidance']:g} &middot; "
-            f"seamless RoPE {config.get('rope', 'nearest') if config['wrap'] else 'off'} &middot; seed {config['seed']}</p>"
+            f"seamless RoPE {html.escape(rope_label(config))} &middot; seed {config['seed']}</p>"
         )
     out.append(
         f"<p>cross <code>--band {config['band']}</code> px &middot; frame <code>--border {config['border']}</code> px"

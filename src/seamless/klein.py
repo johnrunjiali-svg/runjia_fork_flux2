@@ -11,8 +11,8 @@ front of every prompt it encodes. The one thing that is not stock is the attenti
 output's tokens sit on a torus (flux2/torus.py), so the model draws the left edge next to the right
 edge and the top next to the bottom, and the decoder is handed the latent continued past its edges.
 `rope` picks how: "nearest" moves the displacement to its nearest periodic copy, "quantized" rounds
-the frequencies so the rotation itself repeats (both in torus.py). `wrap=False` turns exactly that
-off and leaves stock FLUX.2, the baseline to compare against.
+the frequencies so the rotation itself repeats, plane by plane as `rules` says (both in torus.py).
+`wrap=False` turns exactly that off and leaves stock FLUX.2, the baseline to compare against.
 
 Nothing here assumes a GPU beyond `load`: `toy` builds the same object from small random weights on
 the CPU, which draws noise but runs every line a real run does.
@@ -43,13 +43,15 @@ class Klein:
         guidance: float = 1.0,
         wrap: bool = True,
         rope: str = "nearest",
+        rules: list | None = None,
         unanchor_text: bool = False,
         q_chunk: int = 512,
     ):
         assert guidance == 1 or "" in ctx, "guidance != 1 needs the empty prompt's embedding"
         self.model, self.ae, self.ctx = model, ae, ctx
         self.num_steps, self.guidance = num_steps, guidance
-        self.wrap, self.rope, self.unanchor_text, self.q_chunk = (wrap, wrap), rope, unanchor_text, q_chunk
+        self.wrap, self.rope, self.rules = (wrap, wrap), rope, rules
+        self.unanchor_text, self.q_chunk = unanchor_text, q_chunk
 
     @classmethod
     def load(
@@ -134,7 +136,7 @@ class Klein:
         ref, ref_ids = ref[None], ref_ids[None]
 
         geo = build_torus_geometry(
-            self.model, x_ids, ctx_ids, (gh, gw), self.wrap, self.unanchor_text, ref_ids, self.rope
+            self.model, x_ids, ctx_ids, (gh, gw), self.wrap, self.unanchor_text, ref_ids, self.rope, self.rules
         )
         timesteps = get_schedule(self.num_steps, x.shape[1])
         x = denoise_torus(self.model, x, ctx, geo, timesteps, self.guidance, self.q_chunk, ref=ref)

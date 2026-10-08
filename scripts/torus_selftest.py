@@ -3,7 +3,10 @@
 Every test that involves the geometry runs for both ways of making the RoPE periodic, the nearest
 copy of the displacement and the quantized frequencies (`rope`).
 
-0. The quantized frequencies at 64 tokens are what torus.py says they are.
+0. The quantized frequencies at 64 tokens are what torus.py says they are, and the per-plane rules
+   do what they say: fundamental never reaches zero, keep leaves the trained frequency, an integer
+   sets the cycle count. Kept planes are not periodic, so with them the roll test of 3 must fail
+   even with the text unanchored.
 1. torus_attention == attention written pair by pair from its definition: the nearest-copy
    displacement with the stock frequencies, or the raw displacement with the quantized ones.
 2. wrap off: torus_forward == the stock Flux2.forward.
@@ -113,7 +116,13 @@ def main():
     omega = quantize(frequencies(32, 2000), 64)
     assert torch.equal(omega * 64 / (2 * torch.pi), (omega * 64 / (2 * torch.pi)).round()), "not periodic"
     assert (omega == 0).sum() == 9 and len(set(omega[omega > 0].tolist())) == 5, omega
-    print("ok   quantized frequencies at n = 64: 9 planes blind to position, 7 left on 5 frequencies")
+    trained = frequencies(32, 2000)
+    fundamental = quantize(trained, 64, ["fundamental"] * 16)
+    assert torch.equal(fundamental[:7], omega[:7]) and (fundamental[7:] == 2 * torch.pi / 64).all()
+    mixed = quantize(trained, 64, ["round"] * 7 + ["keep"] * 8 + [3])
+    assert torch.equal(mixed[:7], omega[:7]) and torch.allclose(mixed[7:15], trained[7:15]), mixed
+    assert torch.isclose(mixed[15], torch.tensor(3 * 2 * torch.pi / 64)), mixed[15]
+    print("ok   quantized frequencies at n = 64: 9 planes blind to position, 7 left on 5 frequencies; the rules")
 
     for (gh, gw), wrap, unanchor_text, rope in itertools.product(
         [(6, 8), (5, 7), (2, 3)], [(True, True), (False, True), (False, False)], [False, True], ropes
@@ -159,8 +168,19 @@ def main():
                 assert worst > 1e-5, (tag, worst)
                 print(f"ok   {tag}: NOT roll-equivariant, the text marks the origin ({worst:.1e})")
 
-    # 5
+    # 3, with rules: kept planes are not periodic, fundamental ones are
     gh, gw = 6, 8
+    x_ids, ctx_ids = make_ids(gh, gw, num_txt)
+    x, ctx, t = torch.randn(2, gh * gw, 8), torch.randn(2, num_txt, 12), torch.tensor([0.7, 0.3])
+    for rules, periodic in ((["fundamental"] * 16, True), (["round"] * 8 + ["keep"] * 8, False)):
+        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), unanchor_text=True, rope="quantized", rules=rules)
+        out = torus_forward(model, x, t, ctx, None, geo)
+        rolled = torus_forward(model, roll(x, gh, (2, 3)), t, ctx, None, geo)
+        worst = (rolled - roll(out, gh, (2, 3))).abs().max().item()
+        assert (worst < 1e-4) == periodic, (rules, worst)
+    print("ok   rules: every plane on the fundamental or above is roll-equivariant, a kept plane is not")
+
+    # 5
     x_ids, ctx_ids = make_ids(gh, gw, num_txt)
     ref_ids = make_ref_ids(7, 11)
     n_ref = ref_ids.shape[1]

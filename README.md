@@ -12,8 +12,15 @@ guidance branch. The one change is the **seamless RoPE** of
 the left edge next to the right edge and the top next to the bottom. There are two ways to get
 there, and `--rope` picks one: `nearest` (the default) keeps the model's frequencies and moves every
 displacement to its nearest periodic copy; `quantized` keeps the displacements and rounds every
-frequency so that its rotation repeats after one tile. `--wrap False` turns that off and gives stock
-FLUX.2 as the baseline.
+frequency so that its rotation repeats after one tile. Quantizing can also be done plane by plane,
+rounding the fast frequencies and keeping the slow ones as trained:
+
+```bash
+uv run python scripts/rope_frequencies.py --threshold 0.05     # the table of frequencies; edit, accept, get a .json
+uv run python scripts/run_experiments.py --experiments 3 --rope configs/rope/r7k9.json
+```
+
+`--wrap False` turns all of that off and gives stock FLUX.2 as the baseline.
 
 ## The three experiments
 
@@ -70,7 +77,7 @@ uv run python scripts/run_experiments.py --band 64 --run_name band64
 | `--num_steps` | `4` | |
 | `--seed` | `0` | |
 | `--wrap` | `True` | the seamless RoPE and the circular decode. `False` is stock FLUX.2 |
-| `--rope` | `nearest` | how the RoPE is made periodic: `nearest` copy of the displacement, or `quantized` frequencies (see `torus.py`) |
+| `--rope` | `nearest` | how the RoPE is made periodic: `nearest` copy of the displacement, `quantized` frequencies, or a `.json` of per-plane rules from `scripts/rope_frequencies.py` (see `torus.py`) |
 | `--unanchor_text` | `False` | the text no longer marks an origin on the torus (see `torus.py`) |
 | `--model_name` | `flux.2-klein-9b` | any klein model |
 | `--gpus` | all | physical ids, `0,1,2,3`; otherwise `CUDA_VISIBLE_DEVICES`, otherwise every GPU |

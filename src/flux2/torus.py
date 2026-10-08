@@ -17,9 +17,14 @@ periodic, and this file has both; `rope=` picks one.
 Nothing else changes. The rotation is still each token's own, so the fused attention kernel does the
 rest, and the cost is the frequencies the model was trained with: at n = 64 (a 1024 px tile) the
 nine slowest of the sixteen per axis round to zero, so those planes no longer see position at all,
-and two pairs of neighbours land on one frequency (`quantize`). It is applied to every token on a
-wrapped axis, text and reference included: the text sits at 0, where every rotation is the
-identity, and a reference the size of the tile becomes periodic with it.
+and two pairs of neighbours land on one frequency (`quantize`). That is the whole-hog version. The
+`rules` of `quantize` decide plane by plane: round as above, round but never below the fundamental
+2 pi / n, keep the trained frequency, or set the cycle count by hand -- so the fast planes can be
+made periodic while the slow ones, which carry the coarse layout, stay as trained. Kept planes are
+not periodic, so with any of them the equivariance below is only approximate.
+scripts/rope_frequencies.py shows the table and writes the choice. The quantized rotation is
+applied to every token on a wrapped axis, text and reference included: the text sits at 0, where
+every rotation is the identity, and a reference the size of the tile becomes periodic with it.
 
 "nearest" (the default): keep every frequency and change the displacement. On a circle of n tokens
 the displacement from p to q is not q - p but its nearest periodic copy (the "minimum image
@@ -108,10 +113,29 @@ def frequencies(dim: int, theta: int) -> Tensor:
     return 1.0 / theta ** (torch.arange(0, dim, 2) / dim)
 
 
-def quantize(omega: Tensor, n: int) -> Tensor:
-    """Every frequency moved to the nearest one whose rotation repeats after n tokens: n omega' = 2 pi k.
-    Anything below pi / n rounds to zero, a plane that no longer sees position."""
-    return torch.round(omega * n / (2 * math.pi)) * (2 * math.pi / n)
+def quantize(omega: Tensor, n: int, rules: list | None = None) -> Tensor:
+    """Frequencies moved onto ones whose rotation repeats after n tokens, n omega' = 2 pi k with k an
+    integer: the number of cycles across one edge. `rules`, one per plane, says how (default: all "round").
+
+        "round"        k = round(n omega / 2 pi); below pi / n that is 0, a plane blind to position
+        "fundamental"  the same, but never below k = 1, the slowest rotation that repeats
+        "keep"         omega unchanged, not periodic: the plane as the model was trained
+        an integer     that k
+    """
+    cycles = omega * n / (2 * math.pi)
+    rules = rules or ["round"] * len(omega)
+    assert len(rules) == len(omega), f"{len(rules)} rules for {len(omega)} planes"
+
+    def choose(c: Tensor, rule) -> Tensor:
+        if rule == "round":
+            return c.round()
+        if rule == "fundamental":
+            return c.round().clamp(min=1)
+        if rule == "keep":
+            return c
+        return torch.full_like(c, float(int(rule)))
+
+    return torch.stack([choose(c, rule) for c, rule in zip(cycles, rules)]) * (2 * math.pi / n)
 
 
 def rotations(angle: Tensor) -> Tensor:
@@ -120,14 +144,16 @@ def rotations(angle: Tensor) -> Tensor:
     return rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2).float()
 
 
-def quantized_pe(model: Flux2, ids: Tensor, grid: tuple[int, int], wrap: tuple[bool, bool]) -> Tensor:
+def quantized_pe(
+    model: Flux2, ids: Tensor, grid: tuple[int, int], wrap: tuple[bool, bool], rules: list | None = None
+) -> Tensor:
     """`model.pe_embedder(ids)` with the frequencies of each wrapped axis quantized to its length."""
     emb = model.pe_embedder
     periods = (None, grid[0] if wrap[0] else None, grid[1] if wrap[1] else None, None)  # of (t, h, w, l)
     parts = []
     for axis, (dim, n) in enumerate(zip(emb.axes_dim, periods)):
         omega = frequencies(dim, emb.theta).to(ids.device)
-        parts.append(rotations(ids[..., axis, None].float() * (omega if n is None else quantize(omega, n))))
+        parts.append(rotations(ids[..., axis, None].float() * (omega if n is None else quantize(omega, n, rules))))
     return torch.cat(parts, dim=-3).unsqueeze(1)
 
 
@@ -140,10 +166,12 @@ def build_torus_geometry(
     unanchor_text: bool = False,
     ref_ids: Tensor | None = None,
     rope: str = "nearest",
+    rules: list | None = None,
 ) -> TorusGeometry:
     """`wrap` is (h, w). (False, True) is a cylinder, (False, False) is stock FLUX.2.
     The sequence is [txt, img] or [txt, img, ref]; only the img tokens live on the torus.
-    `rope` is how the displacement is made periodic, "nearest" copy or "quantized" frequencies."""
+    `rope` is how the displacement is made periodic, "nearest" copy or "quantized" frequencies;
+    `rules` are `quantize`'s, plane by plane."""
     parts = (ctx_ids[:1], x_ids[:1]) if ref_ids is None else (ctx_ids[:1], x_ids[:1], ref_ids[:1])
     ids = torch.cat(parts, dim=1)  # [1, N, 4] of (t, h, w, l)
     num_txt = ctx_ids.shape[1]
@@ -153,7 +181,7 @@ def build_torus_geometry(
     img_img = is_img[:, None] & is_img[None, :] # [N, N], only True when both token are img tokens
 
     if rope == "quantized":
-        pe, pe_copy, use_copy = quantized_pe(model, ids, grid, wrap), None, (None, None)
+        pe, pe_copy, use_copy = quantized_pe(model, ids, grid, wrap, rules), None, (None, None)
     else:
         assert rope == "nearest", rope
         ids_copy = ids.clone()
