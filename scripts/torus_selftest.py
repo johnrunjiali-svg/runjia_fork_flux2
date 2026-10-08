@@ -5,8 +5,9 @@ copy of the displacement and the quantized frequencies (`rope`).
 
 0. The quantized frequencies at 64 tokens are what torus.py says they are, and the per-plane rules
    do what they say: fundamental never reaches zero, keep leaves the trained frequency, an integer
-   sets the cycle count. Kept planes are not periodic, so with them the roll test of 3 must fail
-   even with the text unanchored.
+   sets the cycle count, cos / sin leave the frequency and bend the position onto a circle, which
+   is periodic. Kept planes are not periodic, so with them the roll test of 3 must fail even with
+   the text unanchored; the circle is periodic but not shift-equivariant, so it must fail too.
 1. torus_attention == attention written pair by pair from its definition: the nearest-copy
    displacement with the stock frequencies, or the raw displacement with the quantized ones.
 2. wrap off: torus_forward == the stock Flux2.forward.
@@ -35,6 +36,7 @@ from flux2.torus import (
     decode_torus,
     denoise_torus,
     frequencies,
+    positions,
     quantize,
     rotations,
     torus_attention,
@@ -75,10 +77,10 @@ def roll(tokens, gh, shift):
     return rearrange(grid, "b h w c -> b (h w) c")
 
 
-def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, rope="nearest", theta=2000):
-    """The definition, with no trick: logit[p, q] = sum over axes of x_p^T R(displacement) x_q.
+def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, rope="nearest", rules=None, theta=2000):
+    """The definition, with no trick: logit[p, q] = sum over axes of x_p^T R(angle_q - angle_p) x_q.
     Tokens are [txt, img, ref]; the img tokens are the grid[0] * grid[1] right after the text.
-    "nearest" wraps the img-img displacement, "quantized" wraps the frequencies of every pair."""
+    "nearest" wraps the img-img displacement, "quantized" gives every token a periodic angle."""
     n_tok = ids.shape[1]
     index = torch.arange(n_tok)
     is_img = (index >= num_txt) & (index < num_txt + grid[0] * grid[1])
@@ -89,15 +91,19 @@ def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, rope="n
         pos = ids[0, :, axis]
         d = pos[None, :] - pos[:, None]
         omega = frequencies(32, theta)
+        delta = None
         if axis in (1, 2):
             n = grid[axis - 1]
             if wrap[axis - 1] and rope == "quantized":
-                omega = quantize(omega, n)
+                angle = positions(pos.float(), n, rules) * quantize(omega, n, rules)  # [N, 16]
+                delta = angle[None, :] - angle[:, None]
             elif wrap[axis - 1]:
                 d = torch.where(img_img, (d + n // 2) % n - n // 2, d)
-            if unanchor_text:
-                d = torch.where(txt_pair, 0, d)
-        rot = rotations(d[..., None].float() * omega).double()  # [N, N, 16, 2, 2]
+        if delta is None:
+            delta = d[..., None].float() * omega
+        if axis in (1, 2) and unanchor_text:
+            delta = torch.where(txt_pair[..., None], 0.0, delta)
+        rot = rotations(delta).double()  # [N, N, 16, 2, 2]
         qa = q[..., 32 * axis : 32 * axis + 32].reshape(*q.shape[:-1], 16, 2).double()
         ka = k[..., 32 * axis : 32 * axis + 32].reshape(*k.shape[:-1], 16, 2).double()
         logits = logits + torch.einsum("bhpmi,pqmij,bhqmj->bhpq", qa, rot, ka)
@@ -122,6 +128,13 @@ def main():
     mixed = quantize(trained, 64, ["round"] * 7 + ["keep"] * 8 + [3])
     assert torch.equal(mixed[:7], omega[:7]) and torch.allclose(mixed[7:15], trained[7:15]), mixed
     assert torch.isclose(mixed[15], torch.tensor(3 * 2 * torch.pi / 64)), mixed[15]
+    circle = ["round"] * 6 + ["cos", "sin"] * 5
+    assert torch.allclose(quantize(trained, 64, circle)[6:], trained[6:]), "cos / sin must leave the frequency"
+    p = torch.arange(128.0)
+    at = positions(p, 64, circle)
+    assert torch.equal(at[:, :6], p[:, None].expand(-1, 6)), "rounded planes keep the position"
+    on = at[:, 6:]
+    assert torch.allclose(on[64:], on[:64], atol=1e-4) and on.min() >= 0 and on.max() <= 64, "circle not periodic"
     print("ok   quantized frequencies at n = 64: 9 planes blind to position, 7 left on 5 frequencies; the rules")
 
     for (gh, gw), wrap, unanchor_text, rope in itertools.product(
@@ -172,13 +185,22 @@ def main():
     gh, gw = 6, 8
     x_ids, ctx_ids = make_ids(gh, gw, num_txt)
     x, ctx, t = torch.randn(2, gh * gw, 8), torch.randn(2, num_txt, 12), torch.tensor([0.7, 0.3])
-    for rules, periodic in ((["fundamental"] * 16, True), (["round"] * 8 + ["keep"] * 8, False)):
-        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), unanchor_text=True, rope="quantized", rules=rules)
+    for rules, equivariant in (
+        (["fundamental"] * 16, True),
+        (["round"] * 8 + ["keep"] * 8, False),
+        (["round"] * 6 + ["cos", "sin"] * 5, False),
+    ):
+        for unanchor_text in (False, True):
+            geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), unanchor_text=unanchor_text, rope="quantized", rules=rules)
+            q, k, v = torch.randn(3, 2, 2, num_txt + gh * gw, 128).unbind(0)
+            want = pairwise_attention(q, k, v, torch.cat((ctx_ids, x_ids), 1), num_txt, (gh, gw), (True, True), unanchor_text, "quantized", rules)
+            err = (torus_attention(q, k, v, geo, q_chunk=7) - want).abs().max().item()
+            assert err < 1e-5, (rules, unanchor_text, err)
         out = torus_forward(model, x, t, ctx, None, geo)
         rolled = torus_forward(model, roll(x, gh, (2, 3)), t, ctx, None, geo)
         worst = (rolled - roll(out, gh, (2, 3))).abs().max().item()
-        assert (worst < 1e-4) == periodic, (rules, worst)
-    print("ok   rules: every plane on the fundamental or above is roll-equivariant, a kept plane is not")
+        assert (worst < 1e-4) == equivariant, (rules, worst)
+    print("ok   rules: attention matches the definition; fundamental is roll-equivariant, keep and the circle are not")
 
     # 5
     x_ids, ctx_ids = make_ids(gh, gw, num_txt)

@@ -12,12 +12,14 @@ guidance branch. The one change is the **seamless RoPE** of
 the left edge next to the right edge and the top next to the bottom. There are two ways to get
 there, and `--rope` picks one: `nearest` (the default) keeps the model's frequencies and moves every
 displacement to its nearest periodic copy; `quantized` keeps the displacements and rounds every
-frequency so that its rotation repeats after one tile. Quantizing can also be done plane by plane,
-rounding the fast frequencies and keeping the slow ones as trained:
+frequency so that its rotation repeats after one tile. Quantizing can also be done plane by plane:
+round the fast frequencies, and keep the slow ones as trained or bend their position onto a circle
+(`cos` / `sin`, after sphere RoPE), all in `torus.py`:
 
 ```bash
 uv run python scripts/rope_frequencies.py --threshold 0.05     # the table of frequencies; edit, accept, get a .json
 uv run python scripts/run_experiments.py --experiments 3 --rope configs/rope/r7k9.json
+uv run python scripts/run_experiments.py --experiments 3 --rope configs/rope/r6cscscscscs.json   # planes 0-5 rounded, 6-15 on the circle
 ```
 
 `--wrap False` turns all of that off and gives stock FLUX.2 as the baseline.

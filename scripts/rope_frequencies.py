@@ -15,11 +15,14 @@ count is an integer, so the rules are ways of picking that integer:
     fundamental  the nearest one but at least 1: the slowest rotation that still repeats
     keep         the trained frequency, not periodic
     an integer   that many cycles per edge
+    cos, sin     the trained frequency on a position bent into a circle (torus.positions): periodic
+                 without touching the frequency; meant in pairs, cos on one plane, sin on the next
 
 At the prompt, type per-plane edits and press enter to see the table again; an empty line accepts:
 
     7:k          plane 7 keeps its frequency              k = keep, r = round, f = fundamental
-    7-15:f       planes 7 to 15 go to the fundamental    an integer is a cycle count: 4-6:1
+    7-15:f       planes 7 to 15 go to the fundamental    c = cos, s = sin, cs = the two alternating
+    6-15:cs      cos, sin, cos, sin, ... over 6 to 15    an integer is a cycle count: 4-6:1
     r r r r f f f k k k k k k k k k                      all sixteen at once
 
 The choice is written as json; run_experiments.py takes it as --rope <file>. The sheet header and
@@ -32,7 +35,7 @@ from pathlib import Path
 
 from flux2.torus import frequencies, quantize
 
-WORDS = {"k": "keep", "r": "round", "f": "fundamental"}
+WORDS = {"k": "keep", "r": "round", "f": "fundamental", "c": "cos", "s": "sin"}
 
 
 def table(omega, n: int, rules: list) -> str:
@@ -49,13 +52,15 @@ def table(omega, n: int, rules: list) -> str:
     rows = [f"{'plane':>5}  {head:>14}  {head:>14}  {head:>14}  {'':>11}  {head:>14}",
             f"{'':>5}  {'trained':>14}  {'round':>14}  {'fundamental':>14}  {'rule':>11}  {'result':>14}"]
     for i, rule in enumerate(rules):
+        result = f"{rule + ', on a circle':>14}" if rule in ("cos", "sin") else cell(chosen[i])
         rows.append(
-            f"{i:5}  {cell(omega[i].item())}  {cell(all_round[i])}  {cell(all_fundamental[i])}  {str(rule):>11}  {cell(chosen[i])}"
+            f"{i:5}  {cell(omega[i].item())}  {cell(all_round[i])}  {cell(all_fundamental[i])}  {str(rule):>11}  {result}"
         )
     kept, blind = sum(rule == "keep" for rule in rules), chosen.count(0.0)
+    circle = sum(rule in ("cos", "sin") for rule in rules)
     rows.append(
-        f"\n{len(rules) - kept - blind} planes periodic on {n} tokens, {blind} blind to position, "
-        f"{kept} kept as trained (not periodic)"
+        f"\n{len(rules) - kept - blind - circle} planes periodic on {n} tokens, {circle} on a circle, "
+        f"{blind} blind to position, {kept} kept as trained (not periodic)"
     )
     return "\n".join(rows)
 
@@ -79,17 +84,18 @@ def edit(rules: list, line: str) -> list:
         planes, _, what = token.partition(":")
         assert what, f"{token!r}: want plane:rule, e.g. 7:k or 7-15:f"
         first, _, last = planes.partition("-")
-        for i in range(int(first), int(last or first) + 1):
-            rules[i] = rule(what)
+        cycle = list(what) if len(what) > 1 and all(ch in WORDS for ch in what) else [what]  # cs: alternate
+        for j, i in enumerate(range(int(first), int(last or first) + 1)):
+            rules[i] = rule(cycle[j % len(cycle)])
     return rules
 
 
 def name(rules: list) -> str:
-    """r7k9 for seven rounded planes then nine kept; an explicit cycle count is c<k>."""
+    """r7k9 for seven rounded planes then nine kept; an explicit cycle count is n<k>."""
     out, run = [], []
     for rule in rules + [None]:
         if run and rule != run[0]:
-            letter = f"c{run[0]}" if isinstance(run[0], int) else run[0][0]
+            letter = f"n{run[0]}" if isinstance(run[0], int) else run[0][0]
             out.append(letter + (str(len(run)) if len(run) > 1 else ""))
             run = []
         run.append(rule)
@@ -101,7 +107,7 @@ def main(
     dim: int = 32,  # head dims per axis: dim / 2 planes
     theta: int = 2000,
     threshold: float = 0.0,  # planes with omega >= threshold start on `rule`, the rest on keep
-    rule: str = "round",  # round or fundamental
+    rule: str = "round",  # round or fundamental: what the planes above the threshold start on
     out: str | None = None,  # default configs/rope/<name>.json
     yes: bool = False,  # write the starting choice without asking
 ):

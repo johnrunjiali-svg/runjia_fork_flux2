@@ -22,6 +22,16 @@ and two pairs of neighbours land on one frequency (`quantize`). That is the whol
 2 pi / n, keep the trained frequency, or set the cycle count by hand -- so the fast planes can be
 made periodic while the slow ones, which carry the coarse layout, stay as trained. Kept planes are
 not periodic, so with any of them the equivariance below is only approximate.
+
+A third thing to do with a slow plane, after sphere RoPE: keep its frequency and make the position
+periodic instead. The edge is bent into a circle, alpha = 2 pi p / n, and the plane is rotated by
+the trained omega_m times one coordinate of the point on it, in [0, n], the range the model saw:
+
+    X(p) = (cos alpha + 1) n / 2        rule "cos"
+    Y(p) = (sin alpha + 1) n / 2        rule "sin"
+
+Used on neighbouring planes, cos on one and sin on the next, the two together place the token on
+the circle. Periodic, but the logit depends on X(q) - X(p), not on q - p: not shift-equivariant.
 scripts/rope_frequencies.py shows the table and writes the choice. The quantized rotation is
 applied to every token on a wrapped axis, text and reference included: the text sits at 0, where
 every rotation is the identity, and a reference the size of the tile becomes periodic with it.
@@ -120,6 +130,7 @@ def quantize(omega: Tensor, n: int, rules: list | None = None) -> Tensor:
         "round"        k = round(n omega / 2 pi); below pi / n that is 0, a plane blind to position
         "fundamental"  the same, but never below k = 1, the slowest rotation that repeats
         "keep"         omega unchanged, not periodic: the plane as the model was trained
+        "cos", "sin"   omega unchanged too; `positions` bends the position onto a circle instead
         an integer     that k
     """
     cycles = omega * n / (2 * math.pi)
@@ -131,11 +142,22 @@ def quantize(omega: Tensor, n: int, rules: list | None = None) -> Tensor:
             return c.round()
         if rule == "fundamental":
             return c.round().clamp(min=1)
-        if rule == "keep":
+        if rule in ("keep", "cos", "sin"):
             return c
         return torch.full_like(c, float(int(rule)))
 
     return torch.stack([choose(c, rule) for c, rule in zip(cycles, rules)]) * (2 * math.pi / n)
+
+
+def positions(pos: Tensor, n: int, rules: list | None = None) -> Tensor:
+    """[..., N] positions -> [..., N, planes]: what each plane multiplies its frequency with. The
+    position itself, except for the "cos" / "sin" planes, which get a coordinate of the point
+    alpha = 2 pi p / n on a circle, X(p) = (cos alpha + 1) n / 2 or Y(p) = (sin alpha + 1) n / 2."""
+    if not rules:
+        return pos[..., None]
+    alpha = pos * (2 * math.pi / n)
+    on_circle = {"cos": (torch.cos(alpha) + 1) * (n / 2), "sin": (torch.sin(alpha) + 1) * (n / 2)}
+    return torch.stack([on_circle.get(rule, pos) for rule in rules], dim=-1)
 
 
 def rotations(angle: Tensor) -> Tensor:
@@ -152,8 +174,11 @@ def quantized_pe(
     periods = (None, grid[0] if wrap[0] else None, grid[1] if wrap[1] else None, None)  # of (t, h, w, l)
     parts = []
     for axis, (dim, n) in enumerate(zip(emb.axes_dim, periods)):
-        omega = frequencies(dim, emb.theta).to(ids.device)
-        parts.append(rotations(ids[..., axis, None].float() * (omega if n is None else quantize(omega, n, rules))))
+        omega, pos = frequencies(dim, emb.theta).to(ids.device), ids[..., axis].float()
+        if n is None:
+            parts.append(rotations(pos[..., None] * omega))
+        else:
+            parts.append(rotations(positions(pos, n, rules) * quantize(omega, n, rules)))
     return torch.cat(parts, dim=-3).unsqueeze(1)
 
 
