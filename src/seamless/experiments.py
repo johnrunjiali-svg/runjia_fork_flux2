@@ -227,7 +227,7 @@ def header(exp: Experiment, record: dict, config: dict) -> list[str]:
     else:
         settings = (
             f"{config['model_name']}   {config['num_steps']} steps   guidance {config['guidance']:g}"
-            f"   seamless RoPE {'on' if config['wrap'] else 'OFF'}   seed {config['seed']}"
+            f"   seamless RoPE {config['rope'] if config['wrap'] else 'OFF'}   seed {config['seed']}"
             f"   {record['seconds']:.1f} s"
         )
         if record["same_generation_as"]:

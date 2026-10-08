@@ -25,7 +25,7 @@ def main(run_dir: str, shard: int = 0, num_shards: int = 1):
     if not config["dry_run"]:
         from .klein import Klein  # torch, and minutes of loading: not for a dry run
 
-        settings = {k: config[k] for k in ("num_steps", "guidance", "wrap", "unanchor_text")}
+        settings = {k: config[k] for k in ("num_steps", "guidance", "wrap", "rope", "unanchor_text")}
         if config["toy"]:
             klein = Klein.toy([config["prompt"]], config["system_prompt"], **settings)
         else:

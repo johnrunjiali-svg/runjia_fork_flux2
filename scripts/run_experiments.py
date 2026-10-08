@@ -11,6 +11,7 @@
     uv run python scripts/run_experiments.py --system_prompt none         no system turn: the bare prompt (leaves holes unfilled)
     uv run python scripts/run_experiments.py --guidance 2.5               real CFG, two passes per step instead of one
     uv run python scripts/run_experiments.py --wrap False                 stock attention: the baseline without seamless RoPE
+    uv run python scripts/run_experiments.py --rope quantized             frequencies rounded to the grid instead of the nearest copy
     uv run python scripts/run_experiments.py --gpus 0,1,2,3 --run_name first
 
     uv run python scripts/run_experiments.py --dry_run                    no model: the masks and inputs only (laptop)
@@ -135,6 +136,7 @@ def main(
     num_steps: int = 4,
     seed: int = 0,
     wrap: bool = True,  # the seamless RoPE and the circular decode. False: stock FLUX.2
+    rope: str = "nearest",  # how the RoPE is made periodic, see flux2/torus.py: "nearest" copy or "quantized" frequencies
     unanchor_text: bool = False,  # see flux2/torus.py: the text no longer marks an origin on the torus
     model_name: str = "flux.2-klein-9b",
     gpus=None,  # physical ids, 0,1,2,3. Default: CUDA_VISIBLE_DEVICES if set, else every GPU
@@ -183,6 +185,7 @@ def main(
         "num_steps": int(num_steps),
         "seed": int(seed),
         "wrap": bool(wrap),
+        "rope": rope,
         "unanchor_text": bool(unanchor_text),
         "model_name": model_name,
         "dry_run": bool(dry_run),

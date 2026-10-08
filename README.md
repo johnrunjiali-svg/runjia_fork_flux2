@@ -9,8 +9,11 @@ the masked picture given as an ordinary reference image, one prompt behind a sys
 the model it is an inpainter. No mask channel, no inpainting head, no second prompt, no extra
 guidance branch. The one change is the **seamless RoPE** of
 [`src/flux2/torus.py`](src/flux2/torus.py): the output's tokens sit on a torus, so the model draws
-the left edge next to the right edge and the top next to the bottom. `--wrap False` turns that off
-and gives stock FLUX.2 as the baseline.
+the left edge next to the right edge and the top next to the bottom. There are two ways to get
+there, and `--rope` picks one: `nearest` (the default) keeps the model's frequencies and moves every
+displacement to its nearest periodic copy; `quantized` keeps the displacements and rounds every
+frequency so that its rotation repeats after one tile. `--wrap False` turns that off and gives stock
+FLUX.2 as the baseline.
 
 ## The three experiments
 
@@ -67,6 +70,7 @@ uv run python scripts/run_experiments.py --band 64 --run_name band64
 | `--num_steps` | `4` | |
 | `--seed` | `0` | |
 | `--wrap` | `True` | the seamless RoPE and the circular decode. `False` is stock FLUX.2 |
+| `--rope` | `nearest` | how the RoPE is made periodic: `nearest` copy of the displacement, or `quantized` frequencies (see `torus.py`) |
 | `--unanchor_text` | `False` | the text no longer marks an origin on the torus (see `torus.py`) |
 | `--model_name` | `flux.2-klein-9b` | any klein model |
 | `--gpus` | all | physical ids, `0,1,2,3`; otherwise `CUDA_VISIBLE_DEVICES`, otherwise every GPU |

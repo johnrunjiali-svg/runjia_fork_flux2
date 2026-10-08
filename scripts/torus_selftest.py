@@ -1,6 +1,11 @@
 """Seconds on a CPU, random toy weights, no checkpoint:  uv run python scripts/torus_selftest.py
 
-1. torus_attention == attention written pair by pair from the nearest-copy displacement.
+Every test that involves the geometry runs for both ways of making the RoPE periodic, the nearest
+copy of the displacement and the quantized frequencies (`rope`).
+
+0. The quantized frequencies at 64 tokens are what torus.py says they are.
+1. torus_attention == attention written pair by pair from its definition: the nearest-copy
+   displacement with the stock frequencies, or the raw displacement with the quantized ones.
 2. wrap off: torus_forward == the stock Flux2.forward.
 3. unanchor_text: rolling the input latent on the torus rolls the output, i.e. the network cannot
    tell where the image was cut. With the text anchored (the default) the same test must fail.
@@ -9,7 +14,7 @@
 6. denoise_torus: wrap off and guidance 1 is the stock sampler, `sampling.denoise`; guidance != 1
    is classifier-free guidance, which with the empty prompt set equal to the prompt is guidance 1.
 7. seamless.klein.Klein end to end on toy weights: a picture in, a picture of the same size out,
-   the same for the same seed, different with the wrap off or another seed.
+   the same for the same seed, different with the wrap off, the other rope or another seed.
 """
 
 import itertools
@@ -20,9 +25,18 @@ from einops import rearrange
 from PIL import Image
 
 from flux2.autoencoder import AutoEncoder, AutoEncoderParams
-from flux2.model import Flux2, rope
+from flux2.model import Flux2
 from flux2.sampling import denoise
-from flux2.torus import build_torus_geometry, decode_torus, denoise_torus, torus_attention, torus_forward
+from flux2.torus import (
+    build_torus_geometry,
+    decode_torus,
+    denoise_torus,
+    frequencies,
+    quantize,
+    rotations,
+    torus_attention,
+    torus_forward,
+)
 from seamless.klein import Klein
 
 
@@ -58,9 +72,10 @@ def roll(tokens, gh, shift):
     return rearrange(grid, "b h w c -> b (h w) c")
 
 
-def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, theta=2000):
+def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, rope="nearest", theta=2000):
     """The definition, with no trick: logit[p, q] = sum over axes of x_p^T R(displacement) x_q.
-    Tokens are [txt, img, ref]; the img tokens are the grid[0] * grid[1] right after the text."""
+    Tokens are [txt, img, ref]; the img tokens are the grid[0] * grid[1] right after the text.
+    "nearest" wraps the img-img displacement, "quantized" wraps the frequencies of every pair."""
     n_tok = ids.shape[1]
     index = torch.arange(n_tok)
     is_img = (index >= num_txt) & (index < num_txt + grid[0] * grid[1])
@@ -70,13 +85,16 @@ def pairwise_attention(q, k, v, ids, num_txt, grid, wrap, unanchor_text, theta=2
     for axis in range(4):
         pos = ids[0, :, axis]
         d = pos[None, :] - pos[:, None]
+        omega = frequencies(32, theta)
         if axis in (1, 2):
             n = grid[axis - 1]
-            if wrap[axis - 1]:
+            if wrap[axis - 1] and rope == "quantized":
+                omega = quantize(omega, n)
+            elif wrap[axis - 1]:
                 d = torch.where(img_img, (d + n // 2) % n - n // 2, d)
             if unanchor_text:
                 d = torch.where(txt_pair, 0, d)
-        rot = rope(d, 32, theta).double()  # [N, N, 16, 2, 2]
+        rot = rotations(d[..., None].float() * omega).double()  # [N, N, 16, 2, 2]
         qa = q[..., 32 * axis : 32 * axis + 32].reshape(*q.shape[:-1], 16, 2).double()
         ka = k[..., 32 * axis : 32 * axis + 32].reshape(*k.shape[:-1], 16, 2).double()
         logits = logits + torch.einsum("bhpmi,pqmij,bhqmj->bhpq", qa, rot, ka)
@@ -89,19 +107,26 @@ def main():
     torch.manual_seed(0)
     model = Flux2(ToyParams()).eval()
     num_txt = 5
+    ropes = ["nearest", "quantized"]
 
-    for (gh, gw), wrap, unanchor_text in itertools.product(
-        [(6, 8), (5, 7), (2, 3)], [(True, True), (False, True), (False, False)], [False, True]
+    # 0
+    omega = quantize(frequencies(32, 2000), 64)
+    assert torch.equal(omega * 64 / (2 * torch.pi), (omega * 64 / (2 * torch.pi)).round()), "not periodic"
+    assert (omega == 0).sum() == 9 and len(set(omega[omega > 0].tolist())) == 5, omega
+    print("ok   quantized frequencies at n = 64: 9 planes blind to position, 7 left on 5 frequencies")
+
+    for (gh, gw), wrap, unanchor_text, rope in itertools.product(
+        [(6, 8), (5, 7), (2, 3)], [(True, True), (False, True), (False, False)], [False, True], ropes
     ):
         x_ids, ctx_ids = make_ids(gh, gw, num_txt)
-        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text)
-        tag = f"grid {gh}x{gw} wrap {wrap} unanchor_text {unanchor_text}"
+        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text, rope=rope)
+        tag = f"grid {gh}x{gw} wrap {wrap} unanchor_text {unanchor_text} rope {rope}"
 
         # 1
         q, k, v = torch.randn(3, 2, 2, num_txt + gh * gw, 128).unbind(0)
         got = torus_attention(q, k, v, geo, q_chunk=7)
         want = pairwise_attention(
-            q, k, v, torch.cat((ctx_ids, x_ids), 1), num_txt, (gh, gw), wrap, unanchor_text
+            q, k, v, torch.cat((ctx_ids, x_ids), 1), num_txt, (gh, gw), wrap, unanchor_text, rope
         )
         err = (got - want).abs().max().item()
         assert err < 1e-5, (tag, err)
@@ -124,9 +149,12 @@ def main():
             for shift in [(1, 0), (0, 1), (gh // 2, gw // 2), (gh - 1, 3)]:
                 rolled_out = torus_forward(model, roll(x, gh, shift), t, ctx, None, geo, q_chunk=7)
                 worst = max(worst, (rolled_out - roll(out, gh, shift)).abs().max().item())
-            if unanchor_text:
+            # On a grid this small every quantized frequency rounds to zero: the image is blind to
+            # position, so nothing is left for the text to anchor.
+            blind = rope == "quantized" and not any(quantize(frequencies(32, 2000), n).any() for n in (gh, gw))
+            if unanchor_text or blind:
                 assert worst < 1e-4, (tag, worst)
-                print(f"ok   {tag}: roll-equivariant ({worst:.1e})")
+                print(f"ok   {tag}: roll-equivariant ({worst:.1e}){'  (all frequencies zero)' if blind else ''}")
             else:
                 assert worst > 1e-5, (tag, worst)
                 print(f"ok   {tag}: NOT roll-equivariant, the text marks the origin ({worst:.1e})")
@@ -137,13 +165,13 @@ def main():
     ref_ids = make_ref_ids(7, 11)
     n_ref = ref_ids.shape[1]
     x_ref = torch.randn(2, gh * gw + n_ref, 8)
-    for wrap, unanchor_text in itertools.product([(True, True), (False, False)], [False, True]):
-        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text, ref_ids)
+    for wrap, unanchor_text, rope in itertools.product([(True, True), (False, False)], [False, True], ropes):
+        geo = build_torus_geometry(model, x_ids, ctx_ids, (gh, gw), wrap, unanchor_text, ref_ids, rope)
         q, k, v = torch.randn(3, 2, 2, num_txt + gh * gw + n_ref, 128).unbind(0)
         ids = torch.cat((ctx_ids, x_ids, ref_ids), 1)
-        want = pairwise_attention(q, k, v, ids, num_txt, (gh, gw), wrap, unanchor_text)
+        want = pairwise_attention(q, k, v, ids, num_txt, (gh, gw), wrap, unanchor_text, rope)
         err = (torus_attention(q, k, v, geo, q_chunk=7) - want).abs().max().item()
-        assert err < 1e-5, ("ref", wrap, unanchor_text, err)
+        assert err < 1e-5, ("ref", wrap, unanchor_text, rope, err)
         if wrap == (False, False) and not unanchor_text:
             out = torus_forward(model, x_ref, t, ctx, None, geo)
             img_ids = torch.cat((x_ids, ref_ids), 1).expand(2, -1, -1)
@@ -192,12 +220,13 @@ def main():
     assert out.tobytes() == klein(picture, "fill", seed=0).tobytes(), "same seed, different picture"
     assert out.tobytes() != klein(picture, "fill", seed=1).tobytes(), "the seed changed nothing"
     assert out.tobytes() != Klein.toy(["fill"], num_steps=2, wrap=False)(picture, "fill").tobytes()
+    assert out.tobytes() != Klein.toy(["fill"], num_steps=2, rope="quantized")(picture, "fill").tobytes()
     assert (
         out.tobytes() != Klein.toy(["fill"], "You are an inpainter.", num_steps=2)(picture, "fill").tobytes()
     )
     assert Klein.toy(["fill"], guidance=2.0, num_steps=2)(picture, "fill").size == picture.size
     print(
-        "ok   Klein: picture in, picture out; deterministic; seed, wrap, system prompt, guidance reach the sampler"
+        "ok   Klein: picture in, picture out; deterministic; seed, wrap, rope, system prompt, guidance reach the sampler"
     )
     print("all passed")
 

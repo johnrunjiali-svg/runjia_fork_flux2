@@ -72,7 +72,7 @@ def write_report(run_dir: str) -> Path:
         out.append(
             f"<p>{html.escape(config['model_name'])}{' (TOY WEIGHTS: noise)' if config['toy'] else ''} &middot; "
             f"{config['num_steps']} steps &middot; guidance {config['guidance']:g} &middot; "
-            f"seamless RoPE {'on' if config['wrap'] else 'off'} &middot; seed {config['seed']}</p>"
+            f"seamless RoPE {config.get('rope', 'nearest') if config['wrap'] else 'off'} &middot; seed {config['seed']}</p>"
         )
     out.append(
         f"<p>cross <code>--band {config['band']}</code> px &middot; frame <code>--border {config['border']}</code> px"

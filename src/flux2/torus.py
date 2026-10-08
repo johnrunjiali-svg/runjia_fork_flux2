@@ -8,10 +8,22 @@ RoPE makes the logit between a query at p and a key at q
     (R(p) x_p)^T (R(q) x_q) = x_p^T R(q - p) x_q,        R(d) = blockdiag(rot(omega_m * d))
 
 so all that position contributes is the displacement d = q - p. There are two ways to make that
-periodic. One is to move every omega_m onto a multiple of 2 pi / n, so that R(d + n) = R(d); that
-changes the frequencies the model was trained with. The other, this file, keeps every frequency and
-changes the displacement: on a circle of n tokens the displacement from p to q is not q - p but its
-nearest periodic copy (the "minimum image convention" of periodic-boundary simulations)
+periodic, and this file has both; `rope=` picks one.
+
+"quantized": move every frequency onto the nearest one whose rotation comes back after n tokens,
+
+    omega'_m = round(n omega_m / 2 pi) 2 pi / n,        so that R'(d + n) = R'(d).
+
+Nothing else changes. The rotation is still each token's own, so the fused attention kernel does the
+rest, and the cost is the frequencies the model was trained with: at n = 64 (a 1024 px tile) the
+nine slowest of the sixteen per axis round to zero, so those planes no longer see position at all,
+and two pairs of neighbours land on one frequency (`quantize`). It is applied to every token on a
+wrapped axis, text and reference included: the text sits at 0, where every rotation is the
+identity, and a reference the size of the tile becomes periodic with it.
+
+"nearest" (the default): keep every frequency and change the displacement. On a circle of n tokens
+the displacement from p to q is not q - p but its nearest periodic copy (the "minimum image
+convention" of periodic-boundary simulations)
 
     d_near = ((q - p + n/2) mod n) - n/2        in [-n/2, n/2)
 
@@ -33,9 +45,11 @@ What is lost is the fused kernel. Which copy of a key is used depends on the que
 no longer R(p)^T R(q') for any single q', the [N, N] logits have to be written out, and
 F.scaled_dot_product_attention cannot be used. `torus_attention` does it by hand, in query chunks.
 
-Two choices that are not forced, so they are flagged here rather than buried:
+Both make the img-img logits a function of (q - p) mod n, so both are exactly equivariant to cyclic
+shifts of the image tokens (test 3 of scripts/torus_selftest.py). Two choices that are not forced,
+so they are flagged here rather than buried:
 
-- The tie. For even n the displacement n/2 is as far to the left as to the right. The interval is
+- The tie, for "nearest". For even n the displacement n/2 is as far to the left as to the right. The interval is
   taken half open, [-n/2, n/2), so that d_near is a function of (q - p) mod n alone; that is what
   makes the network exactly equivariant to cyclic shifts. Keeping the raw +-n/2 instead would be
   antisymmetric in (p, q) but would change under a shift.
@@ -48,9 +62,10 @@ Two choices that are not forced, so they are flagged here rather than buried:
   floating point (scripts/torus_selftest.py checks this).
 
 An existing picture comes in as a reference image (FLUX.2's own image-to-image): its tokens are
-appended after the image tokens, [txt, img, ref], exactly as the stock `denoise` does. A reference
-is an ordinary flat picture, so every pair that involves a ref token keeps its stock displacement;
-only img-img pairs wrap. That is the whole interface of the experiments in src/seamless: a picture
+appended after the image tokens, [txt, img, ref], exactly as the stock `denoise` does. With "nearest"
+a reference is an ordinary flat picture, every pair that involves a ref token keeps its stock
+displacement and only img-img pairs wrap; with "quantized" the reference shares the periodic
+frequencies (above). That is the whole interface of the experiments in src/seamless: a picture
 with a white hole is the reference, the prompt says to fill the white, and the output is generated
 on the torus -- so whatever the model draws at one edge it draws next to the opposite edge.
 
@@ -58,6 +73,7 @@ Nothing here adds a guidance branch. The sampler is the model's own recipe -- fo
 klein models, 4 steps at guidance 1, one forward pass each -- with the attention swapped.
 """
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -76,14 +92,43 @@ DECODE_PAD_TOKENS = 9
 class TorusGeometry:
     """Everything position contributes, for the joint sequence [txt, img]. Built once per image."""
 
-    pe: Tensor  # [1, 1, N, 64, 2, 2] stock rotations, every token at its own position
-    pe_copy: Tensor  # the same, with image tokens moved to their other periodic copy (h and w both)
-    use_copy_h: Tensor  # [N, N] bool, [query, key]: on the h axis this pair uses the key's copy
-    use_copy_w: Tensor
+    rope: str  # "nearest" or "quantized", see the module docstring
+    pe: Tensor  # [1, 1, N, 64, 2, 2] rotations, every token at its own position (quantized: with omega')
+    pe_copy: Tensor | None  # nearest: the same, with image tokens moved to their other periodic copy (h and w both)
+    use_copy_h: Tensor | None  # nearest: [N, N] bool, [query, key]: on the h axis this pair uses the key's copy
+    use_copy_w: Tensor | None
     txt_pair: Tensor  # [N, N] bool: at least one of the two tokens is text
     dims: dict[str, slice]  # which head dims each axis rotates: t, h, w, l
     num_txt: int
     unanchor_text: bool
+
+
+def frequencies(dim: int, theta: int) -> Tensor:
+    """The omega_m of `model.rope`: dim / 2 of them, from 1 down towards 1 / theta."""
+    return 1.0 / theta ** (torch.arange(0, dim, 2) / dim)
+
+
+def quantize(omega: Tensor, n: int) -> Tensor:
+    """Every frequency moved to the nearest one whose rotation repeats after n tokens: n omega' = 2 pi k.
+    Anything below pi / n rounds to zero, a plane that no longer sees position."""
+    return torch.round(omega * n / (2 * math.pi)) * (2 * math.pi / n)
+
+
+def rotations(angle: Tensor) -> Tensor:
+    """[B, N, D] angles -> [B, N, D, 2, 2] rotation matrices, laid out as `model.rope` lays them."""
+    out = torch.stack([torch.cos(angle), -torch.sin(angle), torch.sin(angle), torch.cos(angle)], dim=-1)
+    return rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2).float()
+
+
+def quantized_pe(model: Flux2, ids: Tensor, grid: tuple[int, int], wrap: tuple[bool, bool]) -> Tensor:
+    """`model.pe_embedder(ids)` with the frequencies of each wrapped axis quantized to its length."""
+    emb = model.pe_embedder
+    periods = (None, grid[0] if wrap[0] else None, grid[1] if wrap[1] else None, None)  # of (t, h, w, l)
+    parts = []
+    for axis, (dim, n) in enumerate(zip(emb.axes_dim, periods)):
+        omega = frequencies(dim, emb.theta).to(ids.device)
+        parts.append(rotations(ids[..., axis, None].float() * (omega if n is None else quantize(omega, n))))
+    return torch.cat(parts, dim=-3).unsqueeze(1)
 
 
 def build_torus_geometry(
@@ -94,9 +139,11 @@ def build_torus_geometry(
     wrap: tuple[bool, bool] = (True, True),
     unanchor_text: bool = False,
     ref_ids: Tensor | None = None,
+    rope: str = "nearest",
 ) -> TorusGeometry:
     """`wrap` is (h, w). (False, True) is a cylinder, (False, False) is stock FLUX.2.
-    The sequence is [txt, img] or [txt, img, ref]; only the img tokens live on the torus."""
+    The sequence is [txt, img] or [txt, img, ref]; only the img tokens live on the torus.
+    `rope` is how the displacement is made periodic, "nearest" copy or "quantized" frequencies."""
     parts = (ctx_ids[:1], x_ids[:1]) if ref_ids is None else (ctx_ids[:1], x_ids[:1], ref_ids[:1])
     ids = torch.cat(parts, dim=1)  # [1, N, 4] of (t, h, w, l)
     num_txt = ctx_ids.shape[1]
@@ -105,28 +152,34 @@ def build_torus_geometry(
     is_img = (index >= num_txt) & (index < num_txt + x_ids.shape[1])
     img_img = is_img[:, None] & is_img[None, :] # [N, N], only True when both token are img tokens
 
-    ids_copy = ids.clone()
-    use_copy = []
-    # axis 1 is the h axis, axis 2 is the w sxia. grid is the image's shape of h and w
-    for axis, n, do_wrap in ((1, grid[0], wrap[0]), (2, grid[1], wrap[1])):
-        # The whole idea, on the n coordinates of one axis.
-        r = torch.arange(n, device=ids.device)
-        d = r[None, :] - r[:, None]  # [query, key]: key - query
-        d_near = (d + n // 2) % n - n // 2 if do_wrap else d
-        copy = torch.where(2 * r < n, r + n, r - n)  # the only other copy of a key ever wanted
-        use = d_near != d
-        assert torch.equal(torch.where(use, copy[None, :] - r[:, None], d), d_near)
+    if rope == "quantized":
+        pe, pe_copy, use_copy = quantized_pe(model, ids, grid, wrap), None, (None, None)
+    else:
+        assert rope == "nearest", rope
+        ids_copy = ids.clone()
+        use_copy = []
+        # axis 1 is the h axis, axis 2 is the w sxia. grid is the image's shape of h and w
+        for axis, n, do_wrap in ((1, grid[0], wrap[0]), (2, grid[1], wrap[1])):
+            # The whole idea, on the n coordinates of one axis.
+            r = torch.arange(n, device=ids.device)
+            d = r[None, :] - r[:, None]  # [query, key]: key - query
+            d_near = (d + n // 2) % n - n // 2 if do_wrap else d
+            copy = torch.where(2 * r < n, r + n, r - n)  # the only other copy of a key ever wanted
+            use = d_near != d
+            assert torch.equal(torch.where(use, copy[None, :] - r[:, None], d), d_near)
 
-        # From coordinates to tokens. Only img-img pairs wrap; text (at coordinate 0) and ref never do.
-        pos = ids[0, :, axis]
-        on_grid = pos.clamp(max=n - 1)  # a ref image may be larger than the grid; it is masked out anyway
-        ids_copy[0, :, axis] = torch.where(is_img, copy[on_grid], pos)
-        use_copy.append(use[on_grid][:, on_grid] & img_img)
+            # From coordinates to tokens. Only img-img pairs wrap; text (at coordinate 0) and ref never do.
+            pos = ids[0, :, axis]
+            on_grid = pos.clamp(max=n - 1)  # a ref image may be larger than the grid; it is masked out anyway
+            ids_copy[0, :, axis] = torch.where(is_img, copy[on_grid], pos)
+            use_copy.append(use[on_grid][:, on_grid] & img_img)
+        pe, pe_copy = model.pe_embedder(ids), model.pe_embedder(ids_copy)
 
     edges = [sum(model.pe_embedder.axes_dim[:i]) for i in range(5)]
     return TorusGeometry(
-        pe=model.pe_embedder(ids),
-        pe_copy=model.pe_embedder(ids_copy),
+        rope=rope,
+        pe=pe,
+        pe_copy=pe_copy,
         use_copy_h=use_copy[0],
         use_copy_w=use_copy[1],
         txt_pair=is_txt[:, None] | is_txt[None, :],
@@ -141,11 +194,14 @@ def torus_attention(q: Tensor, k: Tensor, v: Tensor, geo: TorusGeometry, q_chunk
 
     Peak memory is about eight float32 tensors of [B, heads, q_chunk, N]; lower q_chunk if it does not fit.
     """
-    q = q * q.shape[-1] ** -0.5
     q_rot, k_rot = apply_rope(q, k, geo.pe)
-    # h and w live in separate head dims, so one rotation holds both copies: read the h dims of
-    # k_copy for the h copy, the w dims for the w copy. (The rotated q that comes with it is unused.)
-    _, k_copy = apply_rope(q, k, geo.pe_copy)
+    if geo.rope == "quantized" and not geo.unanchor_text:
+        # Every rotation is the token's own: stock attention under another pe, and the fused kernel does it.
+        return rearrange(F.scaled_dot_product_attention(q_rot, k_rot, v), "b h n d -> b n (h d)")
+    if geo.rope == "nearest":
+        # h and w live in separate head dims, so one rotation holds both copies: read the h dims of
+        # k_copy for the h copy, the w dims for the w copy. (The rotated q that comes with it is unused.)
+        _, k_copy = apply_rope(q, k, geo.pe_copy)
 
     def dot(a: Tensor, b: Tensor, axis: str) -> Tensor:
         """The part of the logits that comes from one axis' block of the head dim."""
@@ -155,13 +211,16 @@ def torus_attention(q: Tensor, k: Tensor, v: Tensor, geo: TorusGeometry, q_chunk
     for start in range(0, q.shape[2], q_chunk):
         rows = slice(start, start + q_chunk)
         qr = q_rot[:, :, rows]
-        hw = torch.where(geo.use_copy_h[rows], dot(qr, k_copy, "h"), dot(qr, k_rot, "h"))
-        hw = hw + torch.where(geo.use_copy_w[rows], dot(qr, k_copy, "w"), dot(qr, k_rot, "w"))
+        if geo.rope == "nearest":
+            hw = torch.where(geo.use_copy_h[rows], dot(qr, k_copy, "h"), dot(qr, k_rot, "h"))
+            hw = hw + torch.where(geo.use_copy_w[rows], dot(qr, k_copy, "w"), dot(qr, k_rot, "w"))
+        else:  # quantized: the rotation itself is periodic, no key moves
+            hw = dot(qr, k_rot, "h") + dot(qr, k_rot, "w")
         if geo.unanchor_text:
             # Unrotated q . k is displacement zero. txt-txt pairs had that anyway (all text is at h=w=0).
             unrotated = dot(q[:, :, rows], k, "h") + dot(q[:, :, rows], k, "w")
             hw = torch.where(geo.txt_pair[rows], unrotated, hw)
-        logits = dot(qr, k_rot, "t") + hw + dot(qr, k_rot, "l")
+        logits = (dot(qr, k_rot, "t") + hw + dot(qr, k_rot, "l")) * q.shape[-1] ** -0.5
         out.append(torch.softmax(logits, dim=-1).to(v.dtype) @ v)
     return rearrange(torch.cat(out, dim=2), "b h n d -> b n (h d)")
 
