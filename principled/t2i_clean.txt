@@ -1,0 +1,12 @@
+# Experiment 5, text to image, second set: clean pictures with few things in them.
+# Each prompt names one kind of object, says how many, keeps the background plain, and makes the objects
+# (or the lines) run off the edge of the picture: a cut-off object only joins up if the seam is right,
+# so the edges are where these pictures are judged.
+a few large red tulips with green stems on a plain pale blue background, some cut off by the edges of the picture
+a winding blue river on plain beige land seen from above, flowing across the left and right edges
+three large orange fish on a plain dark blue background, with fins and tails cut off by the edges
+one thick brown branch with a few green leaves running across the whole picture, on a plain cream background
+five large yellow lemons on a plain white background, some cut off by the edges
+wide diagonal red and cream stripes
+large pink polka dots on a plain mint green background, some cut off by the edges
+a few big white clouds on a plain blue sky, some cut off by the edges
