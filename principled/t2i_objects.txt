@@ -1,0 +1,51 @@
+# Experiment 5, text to image: one prompt per line, blank and # lines are skipped.
+# Short and plain: one kind of object, repeated over a surface. The system turn says "one period of an
+# endless repeat", so the prompts only have to say what the objects are. Grouped by how much a seam shows:
+# scattered small objects forgive a lot, a few large ones and anything with a regular layout forgive nothing.
+
+# plants, dense and organic
+red roses climbing on green vines
+white daisies in a green meadow
+purple lavender flowers in rows
+yellow sunflowers with green leaves
+pink cherry blossom branches
+green fern leaves
+monstera leaves in different sizes
+ivy leaves covering a brick wall
+red poppies and blue cornflowers in tall grass
+ripe red strawberries with white flowers and leaves
+bunches of purple grapes hanging among vine leaves
+orange pumpkins and fallen autumn leaves
+holly leaves and red berries
+cacti and succulents of many kinds
+bamboo stalks and leaves
+
+# animals and small creatures
+orange koi fish swimming in dark blue water
+colourful butterflies on a pale background
+small yellow ducklings on green grass
+black and white cows
+pink flamingos standing in shallow water
+blue and green peacock feathers
+honeybees and honeycomb cells
+ladybugs on green leaves
+sleeping cats of many colours
+
+# food and household things
+sliced lemons and oranges with green leaves
+red apples in a wooden crate
+colourful macarons
+coffee beans
+sushi rolls on a bamboo mat
+glass bottles of different colours
+teacups and teapots with blue flowers
+colourful buttons
+knitted wool in red and white
+
+# things with a regular layout
+red bricks with white mortar
+blue and white ceramic tiles
+a patchwork quilt of coloured squares
+cobblestones on an old street
+sea shells on sand
+scattered gold stars on a dark blue sky
